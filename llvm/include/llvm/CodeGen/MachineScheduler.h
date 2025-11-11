@@ -77,6 +77,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/PriorityQueue.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -1379,6 +1380,65 @@ protected:
   virtual bool tryCandidate(SchedCandidate &Cand, SchedCandidate &TryCand);
 
   void pickNodeFromQueue(SchedBoundary &Zone, SchedCandidate &Cand);
+};
+
+//===----------------------------------------------------------------------===//
+// X86CompareGadgetInstrScore - Helper class for RopSchedStrategy.
+//===----------------------------------------------------------------------===//
+
+struct X86CompareGadgetInstrScore {
+  const TargetInstrInfo *TII;
+  const TargetRegisterInfo *TRI;
+  const unsigned *GadgetFirstInstrDestReg;
+
+  enum InstrCategory {
+    DataMove,
+    Arithmetic,
+    ShiftAndRotate,
+    Unscored,
+  };
+
+  enum InstrDestinationReg {
+    StackPointer,
+    GadgetFirstInstr,
+    Other,
+  };
+
+  explicit X86CompareGadgetInstrScore(const TargetInstrInfo *TII = nullptr,
+    const TargetRegisterInfo *TRI = nullptr, const unsigned *RD = nullptr);
+
+  bool operator() (const SUnit *IA, const SUnit *IB) const;
+
+  float getInstrScore(const SUnit *SU) const;
+
+  InstrCategory getInstrCategory(const MachineInstr *MI) const;
+
+  InstrDestinationReg getInstrTarget(const MachineInstr *MI) const;
+};
+
+//===----------------------------------------------------------------------===//
+// RopSchedStrategy - Return-oriented programming defensive scheduler.
+//===----------------------------------------------------------------------===//
+
+class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
+  PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore> ReadyQ;
+  bool AssignedGadgetFirstInstrDestReg = false;
+  unsigned GadgetFirstInstrDestReg = 0;
+
+public:
+  explicit RopSchedStrategy(const llvm::MachineSchedContext *C);
+
+  void initialize(llvm::ScheduleDAGMI *DAG) override;
+
+  void enterMBB(llvm::MachineBasicBlock *MBB) override;
+
+  llvm::SUnit *pickNode(bool &IsTopNode) override;
+
+  void schedNode(llvm::SUnit *SU, bool IsTopNode) override;
+
+  void releaseTopNode(llvm::SUnit *SU) override;
+
+  void releaseBottomNode(llvm::SUnit *SU) override;
 };
 
 /// If ReorderWhileClustering is set to true, no attempt will be made to
