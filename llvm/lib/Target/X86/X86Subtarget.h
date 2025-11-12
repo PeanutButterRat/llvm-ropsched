@@ -427,6 +427,9 @@ public:
   /// Enable the MachineScheduler pass for all X86 subtargets.
   bool enableMachineScheduler() const override { return true; }
 
+  /// Override the normal setting in X86 targets to allow for testing with post-RA instruction scheduling (w/ RopSched).
+  bool enablePostRAMachineScheduler() const override { return true; }
+
   bool enableEarlyIfConversion() const override;
 
   void getPostRAMutations(std::vector<std::unique_ptr<ScheduleDAGMutation>>

@@ -386,7 +386,7 @@ X86TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 
 ScheduleDAGInstrs *
 X86TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
-  ScheduleDAGMI *DAG = createSchedPostRA(C);
+  ScheduleDAGMI *DAG = createSchedPostRA<RopSchedStrategy>(C);
   DAG->addMutation(createX86MacroFusionDAGMutation());
   return DAG;
 }
