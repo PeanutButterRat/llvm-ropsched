@@ -384,9 +384,21 @@ X86TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
   return DAG;
 }
 
+// Copied over from MachineScheduler.h.
+ScheduleDAGMI *createSchedPostRARopSchedStrategy(MachineSchedContext *C) {
+  ScheduleDAGMI *DAG = new ScheduleDAGMI(C, std::make_unique<RopSchedStrategy>(C, true),
+                                         /*RemoveKillFlags=*/true);
+  const TargetSubtargetInfo &STI = C->MF->getSubtarget();
+  // Add MacroFusion mutation if fusions are not empty.
+  const auto &MacroFusions = STI.getMacroFusions();
+  if (!MacroFusions.empty())
+    DAG->addMutation(createMacroFusionDAGMutation(MacroFusions));
+  return DAG;
+}
+
 ScheduleDAGInstrs *
 X86TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
-  ScheduleDAGMI *DAG = createSchedPostRA<RopSchedStrategy>(C);
+  ScheduleDAGMI *DAG = createSchedPostRARopSchedStrategy(C);
   DAG->addMutation(createX86MacroFusionDAGMutation());
   return DAG;
 }

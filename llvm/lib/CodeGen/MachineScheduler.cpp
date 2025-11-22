@@ -4600,6 +4600,9 @@ void PostGenericScheduler::schedNode(SUnit *SU, bool IsTopNode) {
   }
 }
 
+#undef DEBUG_TYPE
+#define DEBUG_TYPE "ropsched"
+
 //===----------------------------------------------------------------------===//
 // X86CompareGadgetInstrScore - Helper class for RopSchedStrategy.
 //===----------------------------------------------------------------------===//
@@ -4607,7 +4610,21 @@ void PostGenericScheduler::schedNode(SUnit *SU, bool IsTopNode) {
 //===----------------------------------------------------------------------===//
 // RopSchedStrategy - Return-oriented programming defensive scheduler.
 //===----------------------------------------------------------------------===//
-RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C) { }
+RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = false) {
+  const char *PreOrPost = (IsPreRA) ? "Pre-RA" : "Post-RA";
+  const char *Direction = "Top-Down";
+
+  if (IsPreRA) {
+    if (PreRADirection == MISched::Bidirectional) Direction = "Birectional";
+    else if (PreRADirection == MISched::BottomUp) Direction = "Bottom-Up";
+  }
+  else {
+    if (PostRADirection == MISched::Bidirectional) Direction = "Birectional";
+    else if (PostRADirection == MISched::BottomUp) Direction = "Bottom-Up";
+  }
+
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Instantiated (" << PreOrPost << ", " << Direction << ")\n");
+}
 
 typedef X86CompareGadgetInstrScore::InstrCategory InstrCategory;
 typedef X86CompareGadgetInstrScore::InstrDestinationReg InstrDestinationReg;
@@ -4736,6 +4753,9 @@ static ScheduleDAGInstrs *createRopMachineScheduler(MachineSchedContext *C) {
 static MachineSchedRegistry RopSchedRegistry(
   "ropsched", "Return-oriented programming defensive scheduler.",
   createRopMachineScheduler);
+
+#undef DEBUG_TYPE
+#define DEBUG_TYPE "machine-scheduler"
 
 //===----------------------------------------------------------------------===//
 // ILP Scheduler. Currently for experimental analysis of heuristics.

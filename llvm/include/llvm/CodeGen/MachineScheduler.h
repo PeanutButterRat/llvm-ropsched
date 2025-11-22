@@ -1426,7 +1426,7 @@ class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
   unsigned GadgetFirstInstrDestReg = 0;
 
 public:
-  explicit RopSchedStrategy(const llvm::MachineSchedContext *C);
+  explicit RopSchedStrategy(const llvm::MachineSchedContext *C, bool IsPreRA);
 
   void initialize(llvm::ScheduleDAGMI *DAG) override;
 
