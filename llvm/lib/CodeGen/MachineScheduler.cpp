@@ -4718,14 +4718,11 @@ SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
   SUnit *Next = nullptr;
 
   if (SchedulingDirection == MISched::TopDown) {
-    Next = pickTopNode();
+    Next = pickTopNode(IsTopNode);
 
     if (!Next) {
       return nullptr;
     }
-
-    LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Scheduling top node\n");
-    IsTopNode = true;
 
     const MachineInstr *MI = Next->getInstr();
     const MCInstrDesc &Desc = MI->getDesc();
@@ -4748,20 +4745,33 @@ SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
     }
   }
   else if (SchedulingDirection == MISched::BottomUp) {
-    Next = pickBottomNode();
+    Next = pickBottomNode(IsTopNode);
 
     if (!Next) {
       return nullptr;
     }
+  }
+  else {  // SchedulingDirection == MISched::Bidirectional
+    if (PickedTopNodeLast) {
+      Next = pickBottomNode(IsTopNode);
 
-    LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Scheduling bottom node\n");
-    IsTopNode = false;
+      if (!Next) {
+        Next = pickTopNode(IsTopNode);
+      }
+    }
+    else {
+      Next = pickTopNode(IsTopNode);
+
+      if (!Next) {
+        Next = pickBottomNode(IsTopNode);
+      }
+    }
   }
 
   return Next;
 }
 
-SUnit *RopSchedStrategy::pickTopNode() {
+SUnit *RopSchedStrategy::pickTopNode(bool &IsTopNode) {
   LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Attempting to pick top node\n");
 
   while (!TopDownReadyQ.empty()) {
@@ -4769,6 +4779,9 @@ SUnit *RopSchedStrategy::pickTopNode() {
     TopDownReadyQ.pop();
 
     if (!Next->isScheduled) {
+      LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Scheduling top node\n");
+      IsTopNode = true;
+      PickedTopNodeLast = true;
       return Next;
     }
   }
@@ -4776,7 +4789,7 @@ SUnit *RopSchedStrategy::pickTopNode() {
   return nullptr;
 }
 
-SUnit *RopSchedStrategy::pickBottomNode() {
+SUnit *RopSchedStrategy::pickBottomNode(bool &IsTopNode) {
   LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Attempting to pick bottom node\n");
 
   while (!BottomUpReadyQ.empty()) {
@@ -4784,6 +4797,9 @@ SUnit *RopSchedStrategy::pickBottomNode() {
     BottomUpReadyQ.pop();
 
     if (!Next->isScheduled) {
+      LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Scheduling bottom node\n");
+      IsTopNode = false;
+      PickedTopNodeLast = false;
       return Next;
     }
   }

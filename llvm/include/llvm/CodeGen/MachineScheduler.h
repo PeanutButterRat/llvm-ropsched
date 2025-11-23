@@ -1427,6 +1427,7 @@ class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
   bool AssignedGadgetFirstInstrDestReg = false;
   unsigned GadgetFirstInstrDestReg = 0;
   MISched::Direction SchedulingDirection = MISched::TopDown;
+  bool PickedTopNodeLast = false;
 
 public:
   explicit RopSchedStrategy(const llvm::MachineSchedContext *C, bool IsPreRA);
@@ -1437,9 +1438,9 @@ public:
 
   SUnit *pickNode(bool &IsTopNode) override;
 
-  SUnit *pickTopNode();
+  SUnit *pickTopNode(bool &IsTopNode);
 
-  SUnit *pickBottomNode();
+  SUnit *pickBottomNode(bool &IsTopNode);
 
   void schedNode(llvm::SUnit *SU, bool IsTopNode) override;
 
