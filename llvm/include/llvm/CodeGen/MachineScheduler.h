@@ -1390,6 +1390,7 @@ struct X86CompareGadgetInstrScore {
   const TargetInstrInfo *TII;
   const TargetRegisterInfo *TRI;
   const unsigned *GadgetFirstInstrDestReg;
+  bool IsMinHeap;
 
   enum InstrCategory {
     DataMove,
@@ -1405,7 +1406,7 @@ struct X86CompareGadgetInstrScore {
   };
 
   explicit X86CompareGadgetInstrScore(const TargetInstrInfo *TII = nullptr,
-    const TargetRegisterInfo *TRI = nullptr, const unsigned *RD = nullptr);
+    const TargetRegisterInfo *TRI = nullptr, const unsigned *RD = nullptr, bool IsMinHeap = true);
 
   bool operator() (const SUnit *IA, const SUnit *IB) const;
 
@@ -1421,9 +1422,11 @@ struct X86CompareGadgetInstrScore {
 //===----------------------------------------------------------------------===//
 
 class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
-  PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore> ReadyQ;
+  PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore> TopDownReadyQ;
+  PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore> BottomUpReadyQ;
   bool AssignedGadgetFirstInstrDestReg = false;
   unsigned GadgetFirstInstrDestReg = 0;
+  MISched::Direction SchedulingDirection = MISched::TopDown;
 
 public:
   explicit RopSchedStrategy(const llvm::MachineSchedContext *C, bool IsPreRA);
@@ -1432,7 +1435,11 @@ public:
 
   void enterMBB(llvm::MachineBasicBlock *MBB) override;
 
-  llvm::SUnit *pickNode(bool &IsTopNode) override;
+  SUnit *pickNode(bool &IsTopNode) override;
+
+  SUnit *pickTopNode();
+
+  SUnit *pickBottomNode();
 
   void schedNode(llvm::SUnit *SU, bool IsTopNode) override;
 

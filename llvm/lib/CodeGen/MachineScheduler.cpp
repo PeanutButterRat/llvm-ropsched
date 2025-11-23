@@ -4610,22 +4610,6 @@ void PostGenericScheduler::schedNode(SUnit *SU, bool IsTopNode) {
 //===----------------------------------------------------------------------===//
 // RopSchedStrategy - Return-oriented programming defensive scheduler.
 //===----------------------------------------------------------------------===//
-RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = false) {
-  const char *PreOrPost = (IsPreRA) ? "Pre-RA" : "Post-RA";
-  const char *Direction = "Top-Down";
-
-  if (IsPreRA) {
-    if (PreRADirection == MISched::Bidirectional) Direction = "Birectional";
-    else if (PreRADirection == MISched::BottomUp) Direction = "Bottom-Up";
-  }
-  else {
-    if (PostRADirection == MISched::Bidirectional) Direction = "Birectional";
-    else if (PostRADirection == MISched::BottomUp) Direction = "Bottom-Up";
-  }
-
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Instantiated (" << PreOrPost << ", " << Direction << ")\n");
-}
-
 typedef X86CompareGadgetInstrScore::InstrCategory InstrCategory;
 typedef X86CompareGadgetInstrScore::InstrDestinationReg InstrDestinationReg;
 
@@ -4642,12 +4626,13 @@ const std::array<std::pair<X86CompareGadgetInstrScore::InstrCategory, std::vecto
   {X86CompareGadgetInstrScore::ShiftAndRotate, { "SHL", "SHR", "SAR", "SAL", "ROR", "ROL", "RCR", "RCL" }},
 }};
 
-
-X86CompareGadgetInstrScore::X86CompareGadgetInstrScore(const TargetInstrInfo *TII, const TargetRegisterInfo *TRI, const unsigned *RD)
-: TII(TII), TRI(TRI), GadgetFirstInstrDestReg(RD) { }
+X86CompareGadgetInstrScore::X86CompareGadgetInstrScore(const TargetInstrInfo *TII, const TargetRegisterInfo *TRI, const unsigned *RD, bool IsMinHeap)
+: TII(TII), TRI(TRI), GadgetFirstInstrDestReg(RD), IsMinHeap(IsMinHeap) { }
 
 bool X86CompareGadgetInstrScore::operator() (const SUnit *IA, const SUnit *IB) const {
-  return getInstrScore(IA) > getInstrScore(IB);
+  float ScoreA = getInstrScore(IA);
+  float ScoreB = getInstrScore(IB);
+  return (IsMinHeap) ? (ScoreA > ScoreB) : (ScoreA < ScoreB);
 }
 
 float X86CompareGadgetInstrScore::getInstrScore(const SUnit *SU) const {
@@ -4700,51 +4685,121 @@ InstrDestinationReg X86CompareGadgetInstrScore::getInstrTarget(const MachineInst
   return Destination;
 }
 
+RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = false) {
+  const char *PreOrPost = (IsPreRA) ? "Pre-RA" : "Post-RA";
+  const char *Direction = "Top-Down";
+
+  if ((IsPreRA && PreRADirection == MISched::Bidirectional) || (!IsPreRA && PostRADirection == MISched::Bidirectional)) {
+    Direction = "Birectional";
+    SchedulingDirection = MISched::Bidirectional;
+  }
+  if ((IsPreRA && PreRADirection == MISched::BottomUp) || (!IsPreRA && PostRADirection == MISched::BottomUp)) {
+    Direction = "Bottom-Up";
+    SchedulingDirection = MISched::BottomUp;
+  }
+
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Instantiated (" << PreOrPost << ", " << Direction << ")\n");
+}
+
 void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
-  const X86CompareGadgetInstrScore Compare { DAG->TII, DAG->TRI, &this->GadgetFirstInstrDestReg };
-  ReadyQ = PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore>(Compare);
+  const X86CompareGadgetInstrScore MinHeapCompare { DAG->TII, DAG->TRI, &this->GadgetFirstInstrDestReg };
+  const X86CompareGadgetInstrScore MaxHeapCompare { DAG->TII, DAG->TRI, &this->GadgetFirstInstrDestReg, false };
+  TopDownReadyQ = PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore>(MinHeapCompare);
+  BottomUpReadyQ = PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore>(MaxHeapCompare);
 }
 
 void RopSchedStrategy::enterMBB(MachineBasicBlock *MBB) {
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Starting new MBB\n");
   AssignedGadgetFirstInstrDestReg = false;
   GadgetFirstInstrDestReg = 0;
 }
 
 SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
-  if (ReadyQ.empty()) {
-    return nullptr;
-  }
+  SUnit *Next = nullptr;
 
-  SUnit *Next = ReadyQ.top();
-  ReadyQ.pop();
-  IsTopNode = true;
+  if (SchedulingDirection == MISched::TopDown) {
+    Next = pickTopNode();
 
-  const MachineInstr *MI = Next->getInstr();
-  const MCInstrDesc &Desc = MI->getDesc();
+    if (!Next) {
+      return nullptr;
+    }
 
-  if (!AssignedGadgetFirstInstrDestReg) {
-    for (unsigned Def = 0; Def < Desc.getNumDefs(); Def++) {
-      MachineOperand Operand = MI->getOperand(Def);
-      Register Reg = Operand.getReg();
-      GadgetFirstInstrDestReg = Reg.id();
-      AssignedGadgetFirstInstrDestReg = true;
+    LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Scheduling top node\n");
+    IsTopNode = true;
 
-      if (Register::isPhysicalRegister(Reg)) {
-        break;
+    const MachineInstr *MI = Next->getInstr();
+    const MCInstrDesc &Desc = MI->getDesc();
+
+    if (!AssignedGadgetFirstInstrDestReg) {
+      for (unsigned Def = 0; Def < Desc.getNumDefs(); Def++) {
+        MachineOperand Operand = MI->getOperand(Def);
+        Register Reg = Operand.getReg();
+        GadgetFirstInstrDestReg = Reg.id();
+        AssignedGadgetFirstInstrDestReg = true;
+
+        if (Register::isPhysicalRegister(Reg)) {
+          break;
+        }
+      }
+
+      if (AssignedGadgetFirstInstrDestReg) {
+        LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Assigned destination register (" << GadgetFirstInstrDestReg << ")\n");
       }
     }
+  }
+  else if (SchedulingDirection == MISched::BottomUp) {
+    Next = pickBottomNode();
+
+    if (!Next) {
+      return nullptr;
+    }
+
+    LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Scheduling bottom node\n");
+    IsTopNode = false;
   }
 
   return Next;
 }
 
+SUnit *RopSchedStrategy::pickTopNode() {
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Attempting to pick top node\n");
+
+  while (!TopDownReadyQ.empty()) {
+    SUnit *Next = TopDownReadyQ.top();
+    TopDownReadyQ.pop();
+
+    if (!Next->isScheduled) {
+      return Next;
+    }
+  }
+
+  return nullptr;
+}
+
+SUnit *RopSchedStrategy::pickBottomNode() {
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Attempting to pick bottom node\n");
+
+  while (!BottomUpReadyQ.empty()) {
+    SUnit *Next = BottomUpReadyQ.top();
+    BottomUpReadyQ.pop();
+
+    if (!Next->isScheduled) {
+      return Next;
+    }
+  }
+
+  return nullptr;
+}
+
 void RopSchedStrategy::schedNode(SUnit *SU, bool IsTopNode) { }
 
 void RopSchedStrategy::releaseTopNode(SUnit *SU) {
-  ReadyQ.push(SU);
+  TopDownReadyQ.push(SU);
 }
 
-void RopSchedStrategy::releaseBottomNode(SUnit *SU) { }
+void RopSchedStrategy::releaseBottomNode(SUnit *SU) {
+  BottomUpReadyQ.push(SU);
+}
 
 static ScheduleDAGInstrs *createRopMachineScheduler(MachineSchedContext *C) {
   return new ScheduleDAGMILive(C, std::make_unique<RopSchedStrategy>(C));
