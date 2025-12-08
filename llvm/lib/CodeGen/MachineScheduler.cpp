@@ -57,6 +57,7 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
@@ -4606,10 +4607,6 @@ void PostGenericScheduler::schedNode(SUnit *SU, bool IsTopNode) {
 //===----------------------------------------------------------------------===//
 // X86CompareGadgetInstrScore - Helper class for RopSchedStrategy.
 //===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// RopSchedStrategy - Return-oriented programming defensive scheduler.
-//===----------------------------------------------------------------------===//
 typedef X86CompareGadgetInstrScore::InstrCategory InstrCategory;
 typedef X86CompareGadgetInstrScore::InstrDestinationReg InstrDestinationReg;
 
@@ -4685,6 +4682,31 @@ InstrDestinationReg X86CompareGadgetInstrScore::getInstrTarget(const MachineInst
   return Destination;
 }
 
+//===----------------------------------------------------------------------===//
+// RopInstruction - Helper class for RopSchedStrategy.
+//===----------------------------------------------------------------------===//
+
+RopInstruction::RopInstruction(SUnit *SU, ScheduleDAGMI *DAG) {
+  this->SU = SU;
+  this->Score = 0.0f;
+
+  const MachineInstr *MI = SU->getInstr();
+  const unsigned Opcode = MI->getOpcode();
+  Name = DAG->TII->getName(Opcode);
+}
+
+bool RopInstruction::operator<(const RopInstruction& Other) const {
+  return Score < Other.Score;
+}
+
+void RopInstruction::print() const {
+  LLVM_DEBUG(dbgs() << Name << " (" << llvm::format("%.2f", Score) << ")");
+}
+
+//===----------------------------------------------------------------------===//
+// RopSchedStrategy - Return-oriented programming defensive scheduler.
+//===----------------------------------------------------------------------===//
+
 RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = false) {
   const char *PreOrPost = (IsPreRA) ? "Pre-RA" : "Post-RA";
   const char *Direction = "Top-Down";
@@ -4698,10 +4720,12 @@ RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = 
     SchedulingDirection = MISched::BottomUp;
   }
 
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Instantiated (" << PreOrPost << ", " << Direction << ")\n");
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Instantiated (" << PreOrPost << ", " << Direction << ")\n");
 }
 
 void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
+  this->DAG = DAG;
+  ReadyQ.clear();
   const X86CompareGadgetInstrScore MinHeapCompare { DAG->TII, DAG->TRI, &this->GadgetFirstInstrDestReg };
   const X86CompareGadgetInstrScore MaxHeapCompare { DAG->TII, DAG->TRI, &this->GadgetFirstInstrDestReg, false };
   TopDownReadyQ = PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore>(MinHeapCompare);
@@ -4709,7 +4733,7 @@ void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
 }
 
 void RopSchedStrategy::enterMBB(MachineBasicBlock *MBB) {
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Starting new MBB\n");
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Starting new MBB\n");
   AssignedGadgetFirstInstrDestReg = false;
   GadgetFirstInstrDestReg = 0;
 }
@@ -4740,7 +4764,7 @@ SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
       }
 
       if (AssignedGadgetFirstInstrDestReg) {
-        LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Assigned destination register (" << GadgetFirstInstrDestReg << ")\n");
+        LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Assigned destination register: " << GadgetFirstInstrDestReg << "\n");
       }
     }
   }
@@ -4772,14 +4796,12 @@ SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
 }
 
 SUnit *RopSchedStrategy::pickTopNode(bool &IsTopNode) {
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Attempting to pick top node\n");
-
   while (!TopDownReadyQ.empty()) {
     SUnit *Next = TopDownReadyQ.top();
     TopDownReadyQ.pop();
 
     if (!Next->isScheduled) {
-      LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Scheduling top node\n");
+      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling top node\n");
       IsTopNode = true;
       PickedTopNodeLast = true;
       return Next;
@@ -4790,14 +4812,12 @@ SUnit *RopSchedStrategy::pickTopNode(bool &IsTopNode) {
 }
 
 SUnit *RopSchedStrategy::pickBottomNode(bool &IsTopNode) {
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Attempting to pick bottom node\n");
-
   while (!BottomUpReadyQ.empty()) {
     SUnit *Next = BottomUpReadyQ.top();
     BottomUpReadyQ.pop();
 
     if (!Next->isScheduled) {
-      LLVM_DEBUG(dbgs() << "[RopSchedStrategy]: Scheduling bottom node\n");
+      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling bottom node\n");
       IsTopNode = false;
       PickedTopNodeLast = false;
       return Next;
@@ -4811,10 +4831,42 @@ void RopSchedStrategy::schedNode(SUnit *SU, bool IsTopNode) { }
 
 void RopSchedStrategy::releaseTopNode(SUnit *SU) {
   TopDownReadyQ.push(SU);
+
+  RopInstruction Instruction{SU, DAG};
+  auto it = std::lower_bound(ReadyQ.begin(), ReadyQ.end(), Instruction);
+  
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Releasing top node: ");
+  Instruction.print();
+  LLVM_DEBUG(dbgs() << "\n");
+  ReadyQ.insert(it, Instruction);
+
+  printReadyQueue();
 }
 
 void RopSchedStrategy::releaseBottomNode(SUnit *SU) {
   BottomUpReadyQ.push(SU);
+
+  RopInstruction Instruction{SU, DAG};
+  auto it = std::upper_bound(ReadyQ.begin(), ReadyQ.end(), Instruction);
+  
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Releasing bottom node: ");
+  Instruction.print();
+  LLVM_DEBUG(dbgs() << "\n");
+  ReadyQ.insert(it, Instruction);
+
+  printReadyQueue();
+}
+
+void RopSchedStrategy::printReadyQueue() const {
+  size_t Size = ReadyQ.size();
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] ReadyQ (Size " << Size << "): [");
+  for (size_t i = 0; i < Size - 1; i++) {
+    ReadyQ[i].print();
+    LLVM_DEBUG(dbgs() << ", ");
+  }
+
+  ReadyQ[Size - 1].print();
+  LLVM_DEBUG(dbgs() << "]\n");
 }
 
 static ScheduleDAGInstrs *createRopMachineScheduler(MachineSchedContext *C) {

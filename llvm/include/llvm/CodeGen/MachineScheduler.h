@@ -1418,6 +1418,22 @@ struct X86CompareGadgetInstrScore {
 };
 
 //===----------------------------------------------------------------------===//
+// RopInstruction - Helper class for RopSchedStrategy.
+//===----------------------------------------------------------------------===//
+
+struct RopInstruction {
+  SUnit *SU;
+  float Score;
+  StringRef Name;
+  
+  RopInstruction(SUnit *SU, ScheduleDAGMI *DAG);
+
+  bool operator<(const RopInstruction& Other) const;
+
+  void print() const;
+};
+
+//===----------------------------------------------------------------------===//
 // RopSchedStrategy - Return-oriented programming defensive scheduler.
 //===----------------------------------------------------------------------===//
 
@@ -1429,12 +1445,15 @@ class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
   MISched::Direction SchedulingDirection = MISched::TopDown;
   bool PickedTopNodeLast = false;
 
+  ScheduleDAGMI *DAG = nullptr;
+  std::vector<RopInstruction> ReadyQ{};
+
 public:
-  explicit RopSchedStrategy(const llvm::MachineSchedContext *C, bool IsPreRA);
+  explicit RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA);
 
-  void initialize(llvm::ScheduleDAGMI *DAG) override;
+  void initialize(ScheduleDAGMI *DAG) override;
 
-  void enterMBB(llvm::MachineBasicBlock *MBB) override;
+  void enterMBB(MachineBasicBlock *MBB) override;
 
   SUnit *pickNode(bool &IsTopNode) override;
 
@@ -1442,11 +1461,13 @@ public:
 
   SUnit *pickBottomNode(bool &IsTopNode);
 
-  void schedNode(llvm::SUnit *SU, bool IsTopNode) override;
+  void schedNode(SUnit *SU, bool IsTopNode) override;
 
-  void releaseTopNode(llvm::SUnit *SU) override;
+  void releaseTopNode(SUnit *SU) override;
 
-  void releaseBottomNode(llvm::SUnit *SU) override;
+  void releaseBottomNode(SUnit *SU) override;
+
+  void printReadyQueue() const;
 };
 
 /// If ReorderWhileClustering is set to true, no attempt will be made to
