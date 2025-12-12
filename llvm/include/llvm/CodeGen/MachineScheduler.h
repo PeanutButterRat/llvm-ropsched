@@ -1438,13 +1438,10 @@ struct RopInstruction {
 //===----------------------------------------------------------------------===//
 
 class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
-  PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore> TopDownReadyQ;
-  PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore> BottomUpReadyQ;
   bool AssignedGadgetFirstInstrDestReg = false;
+  bool PickedTopNodeLast = false;
   unsigned GadgetFirstInstrDestReg = 0;
   MISched::Direction SchedulingDirection = MISched::TopDown;
-  bool PickedTopNodeLast = false;
-
   ScheduleDAGMI *DAG = nullptr;
   std::vector<RopInstruction> ReadyQ{};
 

@@ -4727,18 +4727,12 @@ void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
   this->DAG = DAG;
   ReadyQ.clear();
 
-  const X86CompareGadgetInstrScore MinHeapCompare { DAG->TII, DAG->TRI, &this->GadgetFirstInstrDestReg };
-  const X86CompareGadgetInstrScore MaxHeapCompare { DAG->TII, DAG->TRI, &this->GadgetFirstInstrDestReg, false };
-  TopDownReadyQ = PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore>(MinHeapCompare);
-  BottomUpReadyQ = PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore>(MaxHeapCompare);
-
   std::vector<std::pair<const char *, SUnit *>> Boundaries {
     { "EntrySU", &DAG->EntrySU },
     { "ExitSU", &DAG->ExitSU }
   };
 
   SUnit SU = DAG->ExitSU;
-  const MachineInstr *MI = SU.getInstr();
 
   for (auto& [Name, SU] : Boundaries) {
     const MachineInstr *MI = SU->getInstr();
@@ -4814,9 +4808,9 @@ SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
 }
 
 SUnit *RopSchedStrategy::pickTopNode(bool &IsTopNode) {
-  while (!TopDownReadyQ.empty()) {
-    SUnit *Next = TopDownReadyQ.top();
-    TopDownReadyQ.pop();
+  while (!ReadyQ.empty()) {
+    SUnit *Next = ReadyQ.front().SU;
+    ReadyQ.erase(ReadyQ.begin());
 
     if (!Next->isScheduled) {
       LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling top node\n");
@@ -4830,9 +4824,9 @@ SUnit *RopSchedStrategy::pickTopNode(bool &IsTopNode) {
 }
 
 SUnit *RopSchedStrategy::pickBottomNode(bool &IsTopNode) {
-  while (!BottomUpReadyQ.empty()) {
-    SUnit *Next = BottomUpReadyQ.top();
-    BottomUpReadyQ.pop();
+  while (!ReadyQ.empty()) {
+    SUnit *Next = ReadyQ.back().SU;
+    ReadyQ.pop_back();
 
     if (!Next->isScheduled) {
       LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling bottom node\n");
@@ -4848,8 +4842,6 @@ SUnit *RopSchedStrategy::pickBottomNode(bool &IsTopNode) {
 void RopSchedStrategy::schedNode(SUnit *SU, bool IsTopNode) { }
 
 void RopSchedStrategy::releaseTopNode(SUnit *SU) {
-  TopDownReadyQ.push(SU);
-
   RopInstruction Instruction{SU, DAG};
   auto it = std::lower_bound(ReadyQ.begin(), ReadyQ.end(), Instruction);
   
@@ -4862,8 +4854,6 @@ void RopSchedStrategy::releaseTopNode(SUnit *SU) {
 }
 
 void RopSchedStrategy::releaseBottomNode(SUnit *SU) {
-  BottomUpReadyQ.push(SU);
-
   RopInstruction Instruction{SU, DAG};
   auto it = std::upper_bound(ReadyQ.begin(), ReadyQ.end(), Instruction);
   
