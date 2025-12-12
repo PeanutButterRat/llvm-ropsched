@@ -4726,10 +4726,28 @@ RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = 
 void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
   this->DAG = DAG;
   ReadyQ.clear();
+
   const X86CompareGadgetInstrScore MinHeapCompare { DAG->TII, DAG->TRI, &this->GadgetFirstInstrDestReg };
   const X86CompareGadgetInstrScore MaxHeapCompare { DAG->TII, DAG->TRI, &this->GadgetFirstInstrDestReg, false };
   TopDownReadyQ = PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore>(MinHeapCompare);
   BottomUpReadyQ = PriorityQueue<SUnit *, std::vector<SUnit *>, X86CompareGadgetInstrScore>(MaxHeapCompare);
+
+  std::vector<std::pair<const char *, SUnit *>> Boundaries {
+    { "EntrySU", &DAG->EntrySU },
+    { "ExitSU", &DAG->ExitSU }
+  };
+
+  SUnit SU = DAG->ExitSU;
+  const MachineInstr *MI = SU.getInstr();
+
+  for (auto& [Name, SU] : Boundaries) {
+    const MachineInstr *MI = SU->getInstr();
+    if (MI) {
+      const unsigned Opcode = MI->getOpcode();
+      StringRef Name = DAG->TII->getName(Opcode);
+      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] ExitSU: " << Name << "\n");
+    }
+  }
 }
 
 void RopSchedStrategy::enterMBB(MachineBasicBlock *MBB) {
