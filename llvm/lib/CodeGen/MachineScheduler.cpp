@@ -4605,10 +4605,8 @@ void PostGenericScheduler::schedNode(SUnit *SU, bool IsTopNode) {
 #define DEBUG_TYPE "ropsched"
 
 //===----------------------------------------------------------------------===//
-// X86CompareGadgetInstrScore - Helper class for RopSchedStrategy.
+// RopInstruction - Helper class for RopSchedStrategy.
 //===----------------------------------------------------------------------===//
-typedef X86CompareGadgetInstrScore::InstrCategory InstrCategory;
-typedef X86CompareGadgetInstrScore::InstrDestinationReg InstrDestinationReg;
 
 constexpr std::array<std::array<float, 3>, 4> InstructionScoringTable {{
   { 2.0f, 1.0f, 0.5f },
@@ -4617,36 +4615,35 @@ constexpr std::array<std::array<float, 3>, 4> InstructionScoringTable {{
   { 0.0f, 0.0f, 0.5f },
 }};
 
-const std::array<std::pair<X86CompareGadgetInstrScore::InstrCategory, std::vector<StringLiteral>>, 3> InstructionPrefixes {{
-  {X86CompareGadgetInstrScore::DataMove, { "PUSH", "POP", "MOV", "XCHG", "LEA", "CMOV" }},
-  {X86CompareGadgetInstrScore::Arithmetic, { "ADD", "SUB", "INC", "DEC", "SBB", "ADC", "MUL", "DIV", "IMUL", "IDIV", "XOR", "NEG", "NOT" }},
-  {X86CompareGadgetInstrScore::ShiftAndRotate, { "SHL", "SHR", "SAR", "SAL", "ROR", "ROL", "RCR", "RCL" }},
+const std::array<std::pair<InstrCategory, std::vector<StringLiteral>>, 3> InstructionPrefixes {{
+  {DataMove, { "PUSH", "POP", "MOV", "XCHG", "LEA", "CMOV" }},
+  {Arithmetic, { "ADD", "SUB", "INC", "DEC", "SBB", "ADC", "MUL", "DIV", "IMUL", "IDIV", "XOR", "NEG", "NOT" }},
+  {ShiftAndRotate, { "SHL", "SHR", "SAR", "SAL", "ROR", "ROL", "RCR", "RCL" }},
 }};
 
-X86CompareGadgetInstrScore::X86CompareGadgetInstrScore(const TargetInstrInfo *TII, const TargetRegisterInfo *TRI, const unsigned *RD, bool IsMinHeap)
-: TII(TII), TRI(TRI), GadgetFirstInstrDestReg(RD), IsMinHeap(IsMinHeap) { }
-
-bool X86CompareGadgetInstrScore::operator() (const SUnit *IA, const SUnit *IB) const {
-  float ScoreA = getInstrScore(IA);
-  float ScoreB = getInstrScore(IB);
-  return (IsMinHeap) ? (ScoreA > ScoreB) : (ScoreA < ScoreB);
-}
-
-float X86CompareGadgetInstrScore::getInstrScore(const SUnit *SU) const {
-  assert(TII && "TII is null");
+RopInstruction::RopInstruction(SUnit *SU, ScheduleDAGMI *DAG) {
   assert(SU && "SUnit is null");
+  assert(DAG && "ScheduleDAGMI is null");
 
+  this->SU = SU;
+  this->DAG = DAG;
   const MachineInstr *MI = SU->getInstr();
-  const InstrCategory Category = getInstrCategory(MI);
-  const InstrDestinationReg DestinationReg = getInstrTarget(MI);
-
-  return InstructionScoringTable[Category][DestinationReg];
+  const unsigned Opcode = MI->getOpcode();
+  Name = DAG->TII->getName(Opcode);
+  Score = calculateScore();
 }
 
-InstrCategory X86CompareGadgetInstrScore::getInstrCategory(const MachineInstr *MI) const {
-  const unsigned Opcode = MI->getOpcode();
-  const StringRef Name = TII->getName(Opcode);
+bool RopInstruction::operator<(const RopInstruction& Other) const {
+  return Score < Other.Score;
+}
 
+float RopInstruction::calculateScore() const {
+  const InstrCategory Category = getInstrCategory();
+  const InstrDestReg DestReg = getInstrDestReg();
+  return InstructionScoringTable[Category][DestReg];
+}
+
+InstrCategory RopInstruction::getInstrCategory() const {
   for (const auto& [Category, Prefixes] : InstructionPrefixes) {
     for (const auto& Prefix : Prefixes) {
       if (Name.starts_with(Prefix)) {
@@ -4655,23 +4652,24 @@ InstrCategory X86CompareGadgetInstrScore::getInstrCategory(const MachineInstr *M
     }
   }
 
-  return Unscored;
+  return Misc;
 }
 
-InstrDestinationReg X86CompareGadgetInstrScore::getInstrTarget(const MachineInstr *MI) const {
+InstrDestReg RopInstruction::getInstrDestReg() const {
+  const MachineInstr *MI = SU->getInstr();
   const MCInstrDesc &Desc = MI->getDesc();
-  InstrDestinationReg Destination = Other;
+  InstrDestReg Destination = Other;
 
   for (size_t i = 0; i < Desc.getNumDefs(); i++) {
     const MachineOperand Operand = MI->getOperand(i);
     const Register Reg = Operand.getReg();
 
-    if (Reg.id() == *GadgetFirstInstrDestReg) {
+    if (Reg.id() == FirstInstrDestReg) {
       Destination = GadgetFirstInstr;
     }
 
     if (Register::isPhysicalRegister(Reg)) {
-      const StringRef Name { TRI->getName(Reg) };
+      const StringRef Name { DAG->TRI->getName(Reg) };
 
       if (Name == "RSP") {
         return StackPointer;
@@ -4680,23 +4678,6 @@ InstrDestinationReg X86CompareGadgetInstrScore::getInstrTarget(const MachineInst
   }
 
   return Destination;
-}
-
-//===----------------------------------------------------------------------===//
-// RopInstruction - Helper class for RopSchedStrategy.
-//===----------------------------------------------------------------------===//
-
-RopInstruction::RopInstruction(SUnit *SU, ScheduleDAGMI *DAG) {
-  this->SU = SU;
-  this->Score = 0.0f;
-
-  const MachineInstr *MI = SU->getInstr();
-  const unsigned Opcode = MI->getOpcode();
-  Name = DAG->TII->getName(Opcode);
-}
-
-bool RopInstruction::operator<(const RopInstruction& Other) const {
-  return Score < Other.Score;
 }
 
 void RopInstruction::print() const {
@@ -4726,6 +4707,7 @@ RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = 
 void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
   this->DAG = DAG;
   ReadyQ.clear();
+  FirstInstrDestReg = -1;
 
   std::vector<std::pair<const char *, SUnit *>> Boundaries {
     { "EntrySU", &DAG->EntrySU },
@@ -4739,15 +4721,9 @@ void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
     if (MI) {
       const unsigned Opcode = MI->getOpcode();
       StringRef Name = DAG->TII->getName(Opcode);
-      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] ExitSU: " << Name << "\n");
+      LLVM_DEBUG(dbgs() << "\n[RopSchedStrategy] Starting new MBB, ExitSU: " << Name << "\n");
     }
   }
-}
-
-void RopSchedStrategy::enterMBB(MachineBasicBlock *MBB) {
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Starting new MBB\n");
-  AssignedGadgetFirstInstrDestReg = false;
-  GadgetFirstInstrDestReg = 0;
 }
 
 SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
@@ -4763,20 +4739,19 @@ SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
     const MachineInstr *MI = Next->getInstr();
     const MCInstrDesc &Desc = MI->getDesc();
 
-    if (!AssignedGadgetFirstInstrDestReg) {
+    if (FirstInstrDestReg == -1) {
       for (unsigned Def = 0; Def < Desc.getNumDefs(); Def++) {
         MachineOperand Operand = MI->getOperand(Def);
         Register Reg = Operand.getReg();
-        GadgetFirstInstrDestReg = Reg.id();
-        AssignedGadgetFirstInstrDestReg = true;
+        FirstInstrDestReg = Reg.id();
 
         if (Register::isPhysicalRegister(Reg)) {
           break;
         }
       }
 
-      if (AssignedGadgetFirstInstrDestReg) {
-        LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Assigned destination register: " << GadgetFirstInstrDestReg << "\n");
+      if (FirstInstrDestReg != -1) {
+        LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Assigned destination register: " << FirstInstrDestReg << "\n");
       }
     }
   }

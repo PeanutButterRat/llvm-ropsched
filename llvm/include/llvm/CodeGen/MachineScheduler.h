@@ -1383,52 +1383,39 @@ protected:
 };
 
 //===----------------------------------------------------------------------===//
-// X86CompareGadgetInstrScore - Helper class for RopSchedStrategy.
-//===----------------------------------------------------------------------===//
-
-struct X86CompareGadgetInstrScore {
-  const TargetInstrInfo *TII;
-  const TargetRegisterInfo *TRI;
-  const unsigned *GadgetFirstInstrDestReg;
-  bool IsMinHeap;
-
-  enum InstrCategory {
-    DataMove,
-    Arithmetic,
-    ShiftAndRotate,
-    Unscored,
-  };
-
-  enum InstrDestinationReg {
-    StackPointer,
-    GadgetFirstInstr,
-    Other,
-  };
-
-  explicit X86CompareGadgetInstrScore(const TargetInstrInfo *TII = nullptr,
-    const TargetRegisterInfo *TRI = nullptr, const unsigned *RD = nullptr, bool IsMinHeap = true);
-
-  bool operator() (const SUnit *IA, const SUnit *IB) const;
-
-  float getInstrScore(const SUnit *SU) const;
-
-  InstrCategory getInstrCategory(const MachineInstr *MI) const;
-
-  InstrDestinationReg getInstrTarget(const MachineInstr *MI) const;
-};
-
-//===----------------------------------------------------------------------===//
 // RopInstruction - Helper class for RopSchedStrategy.
 //===----------------------------------------------------------------------===//
 
+enum InstrCategory {
+  DataMove,
+  Arithmetic,
+  ShiftAndRotate,
+  Misc,
+};
+
+enum InstrDestReg {
+  StackPointer,
+  GadgetFirstInstr,
+  Other,
+};
+
 struct RopInstruction {
   SUnit *SU;
-  float Score;
+  ScheduleDAGMI *DAG;
+
   StringRef Name;
-  
+  unsigned FirstInstrDestReg;
+  float Score;
+
   RopInstruction(SUnit *SU, ScheduleDAGMI *DAG);
 
   bool operator<(const RopInstruction& Other) const;
+
+  float calculateScore() const;
+
+  InstrCategory getInstrCategory() const;
+
+  InstrDestReg getInstrDestReg() const;
 
   void print() const;
 };
@@ -1438,9 +1425,8 @@ struct RopInstruction {
 //===----------------------------------------------------------------------===//
 
 class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
-  bool AssignedGadgetFirstInstrDestReg = false;
   bool PickedTopNodeLast = false;
-  unsigned GadgetFirstInstrDestReg = 0;
+  long long FirstInstrDestReg = -1;
   MISched::Direction SchedulingDirection = MISched::TopDown;
   ScheduleDAGMI *DAG = nullptr;
   std::vector<RopInstruction> ReadyQ{};
@@ -1449,8 +1435,6 @@ public:
   explicit RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA);
 
   void initialize(ScheduleDAGMI *DAG) override;
-
-  void enterMBB(MachineBasicBlock *MBB) override;
 
   SUnit *pickNode(bool &IsTopNode) override;
 
