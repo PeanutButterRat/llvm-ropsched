@@ -1404,6 +1404,9 @@ struct RopInstruction {
   ScheduleDAGMI *DAG;
 
   StringRef Name;
+  InstrCategory Category;
+  InstrDestReg DestReg;
+  std::vector<std::string> Destinations;
   unsigned FirstInstrDestReg;
   float Score;
 
@@ -1411,13 +1414,32 @@ struct RopInstruction {
 
   bool operator<(const RopInstruction& Other) const;
 
-  float calculateScore() const;
+  float calculateScore();
 
   InstrCategory getInstrCategory() const;
 
-  InstrDestReg getInstrDestReg() const;
+  InstrDestReg getInstrDestReg();
 
   void print() const;
+
+  static std::string toString(InstrCategory Category) {
+    switch (Category) {
+      case InstrCategory::DataMove: return "DataMove";
+      case InstrCategory::Arithmetic: return "Arithmetic";
+      case InstrCategory::ShiftAndRotate: return "ShiftAndRotate";
+      case InstrCategory::Misc: return "Misc";
+      default: return "Unknown";
+    }
+  }
+
+  static std::string toString(InstrDestReg DestReg) {
+    switch (DestReg) {
+      case InstrDestReg::StackPointer: return "StackPointer";
+      case InstrDestReg::GadgetFirstInstr: return "GadgetFirstInstr";
+      case InstrDestReg::Other: return "Other";
+      default: return "Unknown";
+    }
+  }
 };
 
 //===----------------------------------------------------------------------===//

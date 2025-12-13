@@ -4637,9 +4637,9 @@ bool RopInstruction::operator<(const RopInstruction& Other) const {
   return Score < Other.Score;
 }
 
-float RopInstruction::calculateScore() const {
-  const InstrCategory Category = getInstrCategory();
-  const InstrDestReg DestReg = getInstrDestReg();
+float RopInstruction::calculateScore() {
+  Category = getInstrCategory();
+  DestReg = getInstrDestReg();
   return InstructionScoringTable[Category][DestReg];
 }
 
@@ -4655,7 +4655,7 @@ InstrCategory RopInstruction::getInstrCategory() const {
   return Misc;
 }
 
-InstrDestReg RopInstruction::getInstrDestReg() const {
+InstrDestReg RopInstruction::getInstrDestReg() {
   const MachineInstr *MI = SU->getInstr();
   const MCInstrDesc &Desc = MI->getDesc();
   InstrDestReg Destination = Other;
@@ -4670,10 +4670,13 @@ InstrDestReg RopInstruction::getInstrDestReg() const {
 
     if (Register::isPhysicalRegister(Reg)) {
       const StringRef Name { DAG->TRI->getName(Reg) };
+      Destinations.push_back(Name.str());
 
       if (Name == "RSP") {
         return StackPointer;
       }
+    } else {
+      Destinations.push_back(std::to_string(Reg.id()));
     }
   }
 
@@ -4681,7 +4684,19 @@ InstrDestReg RopInstruction::getInstrDestReg() const {
 }
 
 void RopInstruction::print() const {
-  LLVM_DEBUG(dbgs() << Name << " (" << llvm::format("%.2f", Score) << ")");
+  LLVM_DEBUG({
+    dbgs() << Name << " [" << toString(Category) << ", " << toString(DestReg);
+
+    dbgs() << " (";
+    for (size_t i = 0; i < Destinations.size(); i++) {
+      dbgs() << Destinations[i];
+      if (i + 1 < Destinations.size())
+        dbgs() << ", ";
+    }
+    dbgs() << ")]";
+
+    dbgs() << " -> (" << llvm::format("%.2f", Score) << ")";
+  });
 }
 
 //===----------------------------------------------------------------------===//
@@ -4692,10 +4707,6 @@ RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = 
   const char *PreOrPost = (IsPreRA) ? "Pre-RA" : "Post-RA";
   const char *Direction = "Top-Down";
 
-  if ((IsPreRA && PreRADirection == MISched::Bidirectional) || (!IsPreRA && PostRADirection == MISched::Bidirectional)) {
-    Direction = "Birectional";
-    SchedulingDirection = MISched::Bidirectional;
-  }
   if ((IsPreRA && PreRADirection == MISched::BottomUp) || (!IsPreRA && PostRADirection == MISched::BottomUp)) {
     Direction = "Bottom-Up";
     SchedulingDirection = MISched::BottomUp;
@@ -4727,55 +4738,35 @@ void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
 }
 
 SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
-  SUnit *Next = nullptr;
+  SUnit *Next = (SchedulingDirection == MISched::TopDown) ? pickTopNode(IsTopNode) : pickTopNode(IsTopNode);
 
-  if (SchedulingDirection == MISched::TopDown) {
-    Next = pickTopNode(IsTopNode);
-
-    if (!Next) {
-      return nullptr;
-    }
-
-    const MachineInstr *MI = Next->getInstr();
-    const MCInstrDesc &Desc = MI->getDesc();
-
-    if (FirstInstrDestReg == -1) {
-      for (unsigned Def = 0; Def < Desc.getNumDefs(); Def++) {
-        MachineOperand Operand = MI->getOperand(Def);
-        Register Reg = Operand.getReg();
-        FirstInstrDestReg = Reg.id();
-
-        if (Register::isPhysicalRegister(Reg)) {
-          break;
-        }
-      }
-
-      if (FirstInstrDestReg != -1) {
-        LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Assigned destination register: " << FirstInstrDestReg << "\n");
-      }
-    }
+  if (!Next) {
+    return nullptr;
   }
-  else if (SchedulingDirection == MISched::BottomUp) {
-    Next = pickBottomNode(IsTopNode);
 
-    if (!Next) {
-      return nullptr;
-    }
-  }
-  else {  // SchedulingDirection == MISched::Bidirectional
-    if (PickedTopNodeLast) {
-      Next = pickBottomNode(IsTopNode);
+  const MachineInstr *MI = Next->getInstr();
+  const MCInstrDesc &Desc = MI->getDesc();
 
-      if (!Next) {
-        Next = pickTopNode(IsTopNode);
+  if (FirstInstrDestReg == -1) {
+    for (unsigned Def = 0; Def < Desc.getNumDefs(); Def++) {
+      MachineOperand Operand = MI->getOperand(Def);
+      Register Reg = Operand.getReg();
+      FirstInstrDestReg = Reg.id();
+
+      if (Register::isPhysicalRegister(Reg)) {
+        break;
       }
     }
-    else {
-      Next = pickTopNode(IsTopNode);
 
-      if (!Next) {
-        Next = pickBottomNode(IsTopNode);
-      }
+    std::string FirstInstrDestRegName = std::to_string(FirstInstrDestReg);
+
+    if (Register::isPhysicalRegister(FirstInstrDestReg)) {
+      const StringRef Name { DAG->TRI->getName(FirstInstrDestReg) };
+      FirstInstrDestRegName = Name.str();
+    }
+
+    if (FirstInstrDestReg != -1) {
+      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Assigned destination register: " << FirstInstrDestRegName << "\n");
     }
   }
 
@@ -4784,11 +4775,15 @@ SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
 
 SUnit *RopSchedStrategy::pickTopNode(bool &IsTopNode) {
   while (!ReadyQ.empty()) {
-    SUnit *Next = ReadyQ.front().SU;
+    RopInstruction Instruction = ReadyQ.front();
     ReadyQ.erase(ReadyQ.begin());
+    SUnit *Next = Instruction.SU;
 
     if (!Next->isScheduled) {
-      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling top node\n");
+      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling top node: ");
+      Instruction.print();
+      LLVM_DEBUG(dbgs() << " (" << ReadyQ.size() << " instruction(s) remaining)\n");
+
       IsTopNode = true;
       PickedTopNodeLast = true;
       return Next;
@@ -4800,11 +4795,15 @@ SUnit *RopSchedStrategy::pickTopNode(bool &IsTopNode) {
 
 SUnit *RopSchedStrategy::pickBottomNode(bool &IsTopNode) {
   while (!ReadyQ.empty()) {
-    SUnit *Next = ReadyQ.back().SU;
+    RopInstruction Instruction = ReadyQ.back();
     ReadyQ.pop_back();
+    SUnit *Next = Instruction.SU;
 
     if (!Next->isScheduled) {
-      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling bottom node\n");
+      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling bottom node: ");
+      Instruction.print();
+      LLVM_DEBUG(dbgs() << " ( " << ReadyQ.size() << " instructions remaining)\n");
+
       IsTopNode = false;
       PickedTopNodeLast = false;
       return Next;
