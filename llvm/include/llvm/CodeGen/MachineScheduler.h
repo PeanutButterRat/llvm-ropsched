@@ -98,6 +98,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <optional>
 
 namespace llvm {
 namespace impl_detail {
@@ -1395,7 +1396,7 @@ enum InstrCategory {
 
 enum InstrDestReg {
   StackPointer,
-  GadgetFirstInstr,
+  GadgetRegister,
   Other,
 };
 
@@ -1404,13 +1405,13 @@ struct RopInstruction {
   ScheduleDAGMI *DAG;
 
   StringRef Name;
+  std::optional<unsigned> AssumedGadgetRegister = std::nullopt;
   InstrCategory Category;
   InstrDestReg DestReg;
   std::vector<std::string> Destinations;
-  unsigned FirstInstrDestReg;
   float Score;
 
-  RopInstruction(SUnit *SU, ScheduleDAGMI *DAG);
+  RopInstruction(SUnit *SU, ScheduleDAGMI *DAG, std::optional<unsigned> AssumedGadgetRegister = std::nullopt);
 
   bool operator<(const RopInstruction& Other) const;
 
@@ -1435,7 +1436,7 @@ struct RopInstruction {
   static std::string toString(InstrDestReg DestReg) {
     switch (DestReg) {
       case InstrDestReg::StackPointer: return "StackPointer";
-      case InstrDestReg::GadgetFirstInstr: return "GadgetFirstInstr";
+      case InstrDestReg::GadgetRegister: return "GadgetRegister";
       case InstrDestReg::Other: return "Other";
       default: return "Unknown";
     }
@@ -1447,8 +1448,8 @@ struct RopInstruction {
 //===----------------------------------------------------------------------===//
 
 class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
-  bool PickedTopNodeLast = false;
-  long long FirstInstrDestReg = -1;
+  std::optional<unsigned> AssumedGadgetRegister = std::nullopt;
+  unsigned NumberOfInstructionsScheduled = 0;
   MISched::Direction SchedulingDirection = MISched::TopDown;
   ScheduleDAGMI *DAG = nullptr;
   std::vector<RopInstruction> ReadyQ{};
