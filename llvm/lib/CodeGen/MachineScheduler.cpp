@@ -4668,7 +4668,7 @@ InstrDestReg RopInstruction::getInstrDestReg() {
     if (Operand.isReg()) {
       const Register Reg = Operand.getReg();
 
-      if (AssumedGadgetRegister.has_value() && Reg.id() == AssumedGadgetRegister && Destination == Other) {
+      if (AssumedGadgetRegister.has_value() && Reg.id() == AssumedGadgetRegister.value() && Destination == Other) {
         Destination = GadgetRegister;
       }
 
@@ -4723,7 +4723,7 @@ RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = 
 void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
   this->DAG = DAG;
   ReadyQ.clear();
-  AssumedGadgetRegister = -1;
+  AssumedGadgetRegister = std::nullopt;
   SUnit *SU = &DAG->ExitSU;
 
   if (SU->isInstr()) {
@@ -4750,7 +4750,7 @@ SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
   const MachineInstr *MI = Next->getInstr();
   const MCInstrDesc &Desc = MI->getDesc();
 
-  if (AssumedGadgetRegister == -1) {
+  if (!AssumedGadgetRegister.has_value()) {
     for (unsigned Def = 0; Def < Desc.getNumDefs(); Def++) {
       MachineOperand Operand = MI->getOperand(Def);
       Register Reg = Operand.getReg();
@@ -4768,7 +4768,7 @@ SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
           const StringRef Name { DAG->TRI->getName(AssumedGadgetRegister.value()) };
           AssumedGadgetRegisterName = Name.str();
       }
-      if (AssumedGadgetRegister != -1) {
+      if (AssumedGadgetRegister.has_value()) {
         LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Assigned destination register: " << AssumedGadgetRegisterName << "\n");
       }
     }
