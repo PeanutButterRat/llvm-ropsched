@@ -4668,8 +4668,8 @@ InstrDestReg RopInstruction::getInstrDestReg() {
     if (Operand.isReg()) {
       const Register Reg = Operand.getReg();
 
-      if (AssumedGadgetRegister.has_value() && Reg.id() == AssumedGadgetRegister) {
-        Destination = std::max(Destination, GadgetRegister);
+      if (AssumedGadgetRegister.has_value() && Reg.id() == AssumedGadgetRegister && Destination == Other) {
+        Destination = GadgetRegister;
       }
 
       if (Register::isPhysicalRegister(Reg)) {
