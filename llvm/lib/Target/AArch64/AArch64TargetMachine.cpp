@@ -501,7 +501,7 @@ AArch64TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 ScheduleDAGInstrs *
 AArch64TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
   const AArch64Subtarget &ST = C->MF->getSubtarget<AArch64Subtarget>();
-  ScheduleDAGMI *DAG = createSchedPostRA<AArch64PostRASchedStrategy>(C);
+  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<RopSchedStrategy>(C) : createSchedPostRA<AArch64PostRASchedStrategy>(C);
   if (ST.hasFusion()) {
     // Run the Macro Fusion after RA again since literals are expanded from
     // pseudos then (v. addPreSched2()).

@@ -207,6 +207,12 @@ static cl::opt<bool>
     DumpCriticalPathLength("misched-dcpl", cl::Hidden,
                            cl::desc("Print critical path length to stdout"));
 
+// This flag is for selecting whether or not to use RopSched as the post-RA machine scheduler to make
+// it easier to benchmark the different combinations of schedulers.
+cl::opt<bool> EnableRopSchedPostRA(
+    "enable-ropsched-postra", cl::Hidden,
+    cl::desc("Toggles which post-RA machine scheduler should be used (default or RopSched)"));
+
 cl::opt<bool> VerifyScheduling(
     "verify-misched", cl::Hidden,
     cl::desc("Verify machine instrs before and after machine scheduling"));
@@ -4708,16 +4714,15 @@ void RopInstruction::print() const {
 // RopSchedStrategy - Return-oriented programming defensive scheduler.
 //===----------------------------------------------------------------------===//
 
-RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA = false) {
-  const char *PreOrPost = (IsPreRA) ? "Pre-RA" : "Post-RA";
+RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C) {
   const char *Direction = "Top-Down";
 
-  if ((IsPreRA && PreRADirection == MISched::BottomUp) || (!IsPreRA && PostRADirection == MISched::BottomUp)) {
+  if (PreRADirection == MISched::BottomUp || PostRADirection == MISched::BottomUp) {
     Direction = "Bottom-Up";
     SchedulingDirection = MISched::BottomUp;
   }
 
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Instantiated (" << PreOrPost << ", " << Direction << ")\n");
+  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Instantiated (" << Direction << ")\n");
 }
 
 void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {

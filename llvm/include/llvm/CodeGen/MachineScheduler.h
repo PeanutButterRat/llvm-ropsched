@@ -119,6 +119,7 @@ enum Direction {
 
 LLVM_ABI extern cl::opt<MISched::Direction> PreRADirection;
 LLVM_ABI extern cl::opt<bool> VerifyScheduling;
+LLVM_ABI extern cl::opt<bool> EnableRopSchedPostRA;
 #ifndef NDEBUG
 extern cl::opt<bool> ViewMISchedDAGs;
 extern cl::opt<bool> PrintDAGs;
@@ -1455,7 +1456,7 @@ class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
   std::vector<RopInstruction> ReadyQ{};
 
 public:
-  explicit RopSchedStrategy(const MachineSchedContext *C, bool IsPreRA);
+  explicit RopSchedStrategy(const MachineSchedContext *C);
 
   void initialize(ScheduleDAGMI *DAG) override;
 
