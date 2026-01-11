@@ -377,6 +377,71 @@ bool X86TargetMachine::isNoopAddrSpaceCast(unsigned SrcAS,
 
 void X86TargetMachine::reset() { SubtargetMap.clear(); }
 
+struct X86PostRARopSchedStrategy : public RopSchedStrategy {
+  explicit X86PostRARopSchedStrategy(const MachineSchedContext *C) : RopSchedStrategy(C) {};
+
+  bool isConditionalDataMove(const MachineInstr &MI) override {
+    switch (const auto Opcode = MI.getOpcode(); Opcode) {
+      case X86::CMOV16rm:
+      case X86::CMOV16rm_ND:
+      case X86::CMOV16rr:
+      case X86::CMOV16rr_ND:
+      case X86::CMOV32rm:
+      case X86::CMOV32rm_ND:
+      case X86::CMOV32rr:
+      case X86::CMOV32rr_ND:
+      case X86::CMOV64rm:
+      case X86::CMOV64rm_ND:
+      case X86::CMOV64rr:
+      case X86::CMOV64rr_ND:
+      case X86::CMPXCHG16B:
+      case X86::CMPXCHG16rm:
+      case X86::CMPXCHG16rr:
+      case X86::CMPXCHG32rm:
+      case X86::CMPXCHG32rr:
+      case X86::CMPXCHG64rm:
+      case X86::CMPXCHG64rr:
+      case X86::CMPXCHG8B:
+      case X86::CMPXCHG8rm:
+      case X86::CMPXCHG8rr:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool isConditionalSet(const MachineInstr &MI) override {
+    switch (const auto Opcode = MI.getOpcode(); Opcode) {
+      case X86::SETB_C32r:
+      case X86::SETB_C64r:
+      case X86::SETCCm:
+      case X86::SETCCm_EVEX:
+      case X86::SETCCr:
+      case X86::SETCCr_EVEX:
+      case X86::SETSSBSY:
+      case X86::SETZUCCm:
+      case X86::SETZUCCr:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool isShiftOrRotate(const MachineInstr &MI) override {
+    const unsigned Opcode = MI.getOpcode();
+    StringRef InstructionName = DAG->TII->getName(Opcode);
+    static const std::vector<StringLiteral> Prefixes{ "SHL", "SHR", "SAR", "SAL", "ROR", "ROL", "RCR", "RCL" };
+
+    for (auto Prefix : Prefixes) {
+      if (InstructionName.starts_with(Prefix)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+};
+
 ScheduleDAGInstrs *
 X86TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
   ScheduleDAGMILive *DAG = createSchedLive(C);
@@ -386,7 +451,7 @@ X86TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 
 ScheduleDAGInstrs *
 X86TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
-  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<RopSchedStrategy>(C) : createSchedPostRA(C);
+  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<X86PostRARopSchedStrategy>(C) : createSchedPostRA(C);
   DAG->addMutation(createX86MacroFusionDAGMutation());
   return DAG;
 }

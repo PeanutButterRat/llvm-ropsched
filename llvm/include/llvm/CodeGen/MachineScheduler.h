@@ -1399,11 +1399,13 @@ class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
   };
 
   std::optional<unsigned> GadgetRegister = std::nullopt;
-  ScheduleDAGMI *DAG = nullptr;
   PriorityQueue<RopInstruction> ReadyQ{};
 
+protected:
+  ScheduleDAGMI *DAG = nullptr;
+
 public:
-  explicit RopSchedStrategy(const MachineSchedContext *C) {};
+  explicit RopSchedStrategy(const MachineSchedContext *C) {}
 
   void initialize(ScheduleDAGMI *DAG) override;
 
@@ -1411,11 +1413,11 @@ public:
 
   SUnit *pickNode(bool &IsTopNode) override;
 
-  void schedNode(SUnit *SU, bool IsTopNode) override {};
+  void schedNode(SUnit *SU, bool IsTopNode) override {}
 
   void releaseTopNode(SUnit *SU) override;
 
-  void releaseBottomNode(SUnit *SU) override {};
+  void releaseBottomNode(SUnit *SU) override {}
 
   float scoreInstruction(const MachineInstr &MI);
 
