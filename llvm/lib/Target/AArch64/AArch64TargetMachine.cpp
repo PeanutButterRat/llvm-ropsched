@@ -487,6 +487,81 @@ AArch64TargetMachine::getSubtargetImpl(const Function &F) const {
   return I.get();
 }
 
+struct AArch64PostRARopSchedStrategy : public RopSchedStrategy {
+  explicit AArch64PostRARopSchedStrategy(const MachineSchedContext *C) : RopSchedStrategy(C) {};
+
+  bool isConditionalDataMove(const MachineInstr &MI) override {
+    switch (const auto Opcode = MI.getOpcode(); Opcode) {
+      case AArch64::CSELWr:
+      case AArch64::CSELXr:
+      case AArch64::CSINCWr:
+      case AArch64::CSINCXr:
+      case AArch64::CSINVWr:
+      case AArch64::CSINVXr:
+      case AArch64::CSNEGWr:
+      case AArch64::CSNEGXr:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool isConditionalSet(const MachineInstr &MI) override {
+    switch (const auto Opcode = MI.getOpcode(); Opcode) {
+      case AArch64::CSINCWr:
+      case AArch64::CSINCXr:
+      case AArch64::CSINVWr:
+      case AArch64::CSINVXr: {
+        // The CSET instructions are aliases of the CINC and CINV instructions
+        // with the operands set to the zero register, so you have to check
+        // the registers to detect this set of instructions.
+        return operandIsZeroRegister(MI, 1) && operandIsZeroRegister(MI, 2);
+      }
+      default:
+        return false;
+    }
+  }
+
+  bool operandIsZeroRegister(const MachineInstr &MI, unsigned Index) {
+    const MachineOperand &Operand = MI.getOperand(Index);
+    return Operand.isReg() && (Operand.getReg() == AArch64::WZR || Operand.getReg() == AArch64::XZR);
+  }
+
+  bool isShiftOrRotate(const MachineInstr &MI) override {
+    switch (const auto Opcode = MI.getOpcode(); Opcode) {
+      case AArch64::LSLVWr:
+      case AArch64::LSLVXr:
+      case AArch64::LSRVWr:
+      case AArch64::LSRVXr:
+      case AArch64::ASRVWr:
+      case AArch64::ASRVXr:
+      case AArch64::RORVWr:
+      case AArch64::RORVXr:
+      
+      // ROR [immediate] is an alias of EXTR.
+      case AArch64::EXTRWrri:
+      case AArch64::EXTRXrri:
+
+      // LSL [immediate] is an alias of UBFM.
+      case AArch64::UBFMWri:
+      case AArch64::UBFMXri:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool modifiesStackPointer(const MachineInstr &MI) override {
+    std::optional<Register> DestinationRegister = getDestinationRegister(MI);
+
+    if (DestinationRegister.has_value() && Register::isPhysicalRegister(DestinationRegister.value())) {
+      return DestinationRegister.value().id() == AArch64::SP;
+    }
+
+    return false;
+  }
+};
+
 ScheduleDAGInstrs *
 AArch64TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
   const AArch64Subtarget &ST = C->MF->getSubtarget<AArch64Subtarget>();
@@ -501,7 +576,7 @@ AArch64TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 ScheduleDAGInstrs *
 AArch64TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
   const AArch64Subtarget &ST = C->MF->getSubtarget<AArch64Subtarget>();
-  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<RopSchedStrategy>(C) : createSchedPostRA<AArch64PostRASchedStrategy>(C);
+  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<AArch64PostRARopSchedStrategy>(C) : createSchedPostRA<AArch64PostRASchedStrategy>(C);
   if (ST.hasFusion()) {
     // Run the Macro Fusion after RA again since literals are expanded from
     // pseudos then (v. addPreSched2()).

@@ -1385,94 +1385,61 @@ protected:
 };
 
 //===----------------------------------------------------------------------===//
-// RopInstruction - Helper class for RopSchedStrategy.
-//===----------------------------------------------------------------------===//
-
-enum InstrCategory {
-  DataMove,
-  Arithmetic,
-  ShiftAndRotate,
-  Misc,
-};
-
-enum InstrDestReg {
-  StackPointer,
-  GadgetRegister,
-  Other,
-};
-
-struct RopInstruction {
-  SUnit *SU;
-  ScheduleDAGMI *DAG;
-
-  StringRef Name;
-  std::optional<unsigned> AssumedGadgetRegister = std::nullopt;
-  InstrCategory Category;
-  InstrDestReg DestReg;
-  std::vector<std::string> Destinations;
-  float Score;
-
-  RopInstruction(SUnit *SU, ScheduleDAGMI *DAG, std::optional<unsigned> AssumedGadgetRegister = std::nullopt);
-
-  bool operator<(const RopInstruction& Other) const;
-
-  float calculateScore();
-
-  InstrCategory getInstrCategory() const;
-
-  InstrDestReg getInstrDestReg();
-
-  void print() const;
-
-  static std::string toString(InstrCategory Category) {
-    switch (Category) {
-      case InstrCategory::DataMove: return "DataMove";
-      case InstrCategory::Arithmetic: return "Arithmetic";
-      case InstrCategory::ShiftAndRotate: return "ShiftAndRotate";
-      case InstrCategory::Misc: return "Misc";
-      default: return "Unknown";
-    }
-  }
-
-  static std::string toString(InstrDestReg DestReg) {
-    switch (DestReg) {
-      case InstrDestReg::StackPointer: return "StackPointer";
-      case InstrDestReg::GadgetRegister: return "GadgetRegister";
-      case InstrDestReg::Other: return "Other";
-      default: return "Unknown";
-    }
-  }
-};
-
-//===----------------------------------------------------------------------===//
 // RopSchedStrategy - Return-oriented programming defensive scheduler.
 //===----------------------------------------------------------------------===//
 
 class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
-  std::optional<unsigned> AssumedGadgetRegister = std::nullopt;
-  unsigned NumberOfInstructionsScheduled = 0;
-  MISched::Direction SchedulingDirection = MISched::TopDown;
+  using RopInstruction = std::pair<float, SUnit *>;
+
+  struct Compare {
+    // Simply orders SUnits based on their ROP score (min-heap/lowest first).
+    bool operator()(const RopInstruction& a, const RopInstruction& b) {
+      return a.first > b.first;
+    }
+  };
+
+  std::optional<unsigned> GadgetRegister = std::nullopt;
   ScheduleDAGMI *DAG = nullptr;
-  std::vector<RopInstruction> ReadyQ{};
+  PriorityQueue<RopInstruction> ReadyQ{};
 
 public:
-  explicit RopSchedStrategy(const MachineSchedContext *C);
+  explicit RopSchedStrategy(const MachineSchedContext *C) {};
 
   void initialize(ScheduleDAGMI *DAG) override;
 
+  void enterMBB(MachineBasicBlock *MBB) override;
+
   SUnit *pickNode(bool &IsTopNode) override;
 
-  SUnit *pickTopNode(bool &IsTopNode);
-
-  SUnit *pickBottomNode(bool &IsTopNode);
-
-  void schedNode(SUnit *SU, bool IsTopNode) override;
+  void schedNode(SUnit *SU, bool IsTopNode) override {};
 
   void releaseTopNode(SUnit *SU) override;
 
-  void releaseBottomNode(SUnit *SU) override;
+  void releaseBottomNode(SUnit *SU) override {};
 
-  void printReadyQueue() const;
+  float scoreInstruction(const MachineInstr &MI);
+
+  std::optional<Register> getDestinationRegister(const MachineInstr &MI);
+
+  virtual bool isConditionalJump(const MachineInstr &MI);
+
+  virtual bool isDataMove(const MachineInstr &MI);
+
+  virtual bool isDataLoad(const MachineInstr &MI);
+  
+  virtual bool isConditionalDataMove(const MachineInstr &MI);
+
+  virtual bool isConditionalSet(const MachineInstr &MI);
+
+  virtual bool isShiftOrRotate(const MachineInstr &MI);
+
+  virtual bool modifiesDataRegister(const MachineInstr &MI);
+
+  virtual bool writesToMemory(const MachineInstr &MI);
+
+  virtual bool modifiesStackPointer(const MachineInstr &MI);
+
+  virtual bool modifiesBranchTarget(const MachineInstr &MI);
 };
 
 /// If ReorderWhileClustering is set to true, no attempt will be made to

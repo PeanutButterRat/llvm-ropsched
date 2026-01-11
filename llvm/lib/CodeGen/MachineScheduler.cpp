@@ -4611,188 +4611,44 @@ void PostGenericScheduler::schedNode(SUnit *SU, bool IsTopNode) {
 #define DEBUG_TYPE "ropsched"
 
 //===----------------------------------------------------------------------===//
-// RopInstruction - Helper class for RopSchedStrategy.
-//===----------------------------------------------------------------------===//
-
-constexpr std::array<std::array<float, 3>, 4> InstructionScoringTable {{
-  { 2.0f, 1.0f, 0.5f },
-  { 2.0f, 1.0f, 0.5f },
-  { 3.0f, 2.0f, 0.5f },
-  { 0.0f, 0.0f, 0.5f },
-}};
-
-const std::array<std::pair<InstrCategory, std::vector<StringLiteral>>, 3> InstructionPrefixes {{
-  {DataMove, { "PUSH", "POP", "MOV", "XCHG", "LEA", "CMOV" }},
-  {Arithmetic, { "ADD", "SUB", "INC", "DEC", "SBB", "ADC", "MUL", "DIV", "IMUL", "IDIV", "XOR", "NEG", "NOT" }},
-  {ShiftAndRotate, { "SHL", "SHR", "SAR", "SAL", "ROR", "ROL", "RCR", "RCL" }},
-}};
-
-RopInstruction::RopInstruction(SUnit *SU, ScheduleDAGMI *DAG, std::optional<unsigned> AssumedGadgetRegister) {
-  assert(SU && "SUnit is null");
-  assert(DAG && "ScheduleDAGMI is null");
-
-  this->SU = SU;
-  this->DAG = DAG;
-  this->AssumedGadgetRegister = AssumedGadgetRegister;
-
-  const MachineInstr *MI = SU->getInstr();
-  const unsigned Opcode = MI->getOpcode();
-  Name = DAG->TII->getName(Opcode);
-  Score = calculateScore();
-}
-
-bool RopInstruction::operator<(const RopInstruction& Other) const {
-  return Score < Other.Score;
-}
-
-float RopInstruction::calculateScore() {
-  Category = getInstrCategory();
-  DestReg = getInstrDestReg();
-  return InstructionScoringTable[Category][DestReg];
-}
-
-InstrCategory RopInstruction::getInstrCategory() const {
-  for (const auto& [Category, Prefixes] : InstructionPrefixes) {
-    for (const auto& Prefix : Prefixes) {
-      if (Name.starts_with(Prefix)) {
-        return Category;
-      }
-    }
-  }
-
-  return Misc;
-}
-
-InstrDestReg RopInstruction::getInstrDestReg() {
-  const MachineInstr *MI = SU->getInstr();
-  const MCInstrDesc &Desc = MI->getDesc();
-  InstrDestReg Destination = Other;
-
-  for (size_t i = 0; i < Desc.getNumOperands(); i++) {
-    const MachineOperand Operand = MI->getOperand(i);
-
-    if (Operand.isReg()) {
-      const Register Reg = Operand.getReg();
-
-      if (AssumedGadgetRegister.has_value() && Reg.id() == AssumedGadgetRegister.value() && Destination == Other) {
-        Destination = GadgetRegister;
-      }
-
-      if (Register::isPhysicalRegister(Reg)) {
-        const StringRef Name { DAG->TRI->getName(Reg) };
-        Destinations.push_back(Name.str());
-
-        if (Name == "RSP") {
-          Destination = StackPointer;
-        }
-      } else {
-        Destinations.push_back(std::to_string(Reg.id()));
-      }
-    }
-  }
-
-  return Destination;
-}
-
-void RopInstruction::print() const {
-  LLVM_DEBUG({
-    dbgs() << Name << " [" << toString(Category) << ", " << toString(DestReg);
-
-    dbgs() << " (";
-    for (size_t i = 0; i < Destinations.size(); i++) {
-      dbgs() << Destinations[i];
-      if (i + 1 < Destinations.size())
-        dbgs() << ", ";
-    }
-    dbgs() << ")]";
-
-    dbgs() << " -> (" << llvm::format("%.2f", Score) << ")";
-  });
-}
-
-//===----------------------------------------------------------------------===//
 // RopSchedStrategy - Return-oriented programming defensive scheduler.
 //===----------------------------------------------------------------------===//
-
-RopSchedStrategy::RopSchedStrategy(const MachineSchedContext *C) {
-  const char *Direction = "Top-Down";
-
-  if (PreRADirection == MISched::BottomUp || PostRADirection == MISched::BottomUp) {
-    Direction = "Bottom-Up";
-    SchedulingDirection = MISched::BottomUp;
-  }
-
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Instantiated (" << Direction << ")\n");
-}
 
 void RopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
   this->DAG = DAG;
   ReadyQ.clear();
-  AssumedGadgetRegister = std::nullopt;
-  SUnit *SU = &DAG->ExitSU;
-
-  if (SU->isInstr()) {
-    RopInstruction Instruction{SU, DAG, AssumedGadgetRegister};
-    LLVM_DEBUG(dbgs() << "\n[RopSchedStrategy] Starting new MBB, ExitSU: ");
-    Instruction.print();
-    LLVM_DEBUG(dbgs() << "\n");
-  }
-
-  if (NumberOfInstructionsScheduled > 0) {
-    LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduled " << NumberOfInstructionsScheduled << " in the last block\n");
-    NumberOfInstructionsScheduled = 0;
-  }
 }
+
+void RopSchedStrategy::enterMBB(MachineBasicBlock *MBB) {
+  std::map<unsigned, unsigned> Frequency;
+
+  for (const MachineInstr &MI : *MBB) {
+    for (unsigned Def = 0; Def < MI.getNumExplicitDefs(); Def++) {
+      const MachineOperand &Operand = MI.getOperand(Def);
+      const Register &Reg = Operand.getReg();
+      Frequency[Reg.id()]++;
+    }
+  }
+
+  GadgetRegister = std::nullopt;
+  unsigned MaxFreqency = 0;
+
+  for (const auto &Entry : Frequency) {
+    if (Entry.second > MaxFreqency) {
+      GadgetRegister = Entry.first;
+      MaxFreqency = Entry.second;
+    }
+  }
+};
 
 SUnit *RopSchedStrategy::pickNode(bool &IsTopNode) {
-  SUnit *Next = (SchedulingDirection == MISched::TopDown) ? pickTopNode(IsTopNode) : pickBottomNode(IsTopNode);
-  NumberOfInstructionsScheduled++;
-
-  if (!Next) {
-    return nullptr;
-  }
-
-  const MachineInstr *MI = Next->getInstr();
-  const MCInstrDesc &Desc = MI->getDesc();
-
-  if (!AssumedGadgetRegister.has_value()) {
-    for (unsigned Def = 0; Def < Desc.getNumDefs(); Def++) {
-      MachineOperand Operand = MI->getOperand(Def);
-      Register Reg = Operand.getReg();
-      AssumedGadgetRegister = Reg.id();
-
-      if (Register::isPhysicalRegister(Reg)) {
-        break;
-      }
-    }
-
-    if (AssumedGadgetRegister.has_value()) {
-      std::string AssumedGadgetRegisterName = std::to_string(AssumedGadgetRegister.value());
-
-      if (Register::isPhysicalRegister(AssumedGadgetRegister.value())) {
-          const StringRef Name { DAG->TRI->getName(AssumedGadgetRegister.value()) };
-          AssumedGadgetRegisterName = Name.str();
-      }
-      if (AssumedGadgetRegister.has_value()) {
-        LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Assigned destination register: " << AssumedGadgetRegisterName << "\n");
-      }
-    }
-  }
-
-  return Next;
-}
-
-SUnit *RopSchedStrategy::pickTopNode(bool &IsTopNode) {
   while (!ReadyQ.empty()) {
-    RopInstruction Instruction = ReadyQ.front();
-    ReadyQ.erase(ReadyQ.begin());
-    SUnit *Next = Instruction.SU;
+    RopInstruction Instruction = ReadyQ.top();
+    ReadyQ.pop();
+
+    SUnit *Next = Instruction.second;
 
     if (!Next->isScheduled) {
-      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling top node: ");
-      Instruction.print();
-      LLVM_DEBUG(dbgs() << " (" << ReadyQ.size() << " instruction(s) remaining)\n");
-
       IsTopNode = true;
       return Next;
     }
@@ -4801,69 +4657,126 @@ SUnit *RopSchedStrategy::pickTopNode(bool &IsTopNode) {
   return nullptr;
 }
 
-SUnit *RopSchedStrategy::pickBottomNode(bool &IsTopNode) {
-  while (!ReadyQ.empty()) {
-    RopInstruction Instruction = ReadyQ.back();
-    ReadyQ.pop_back();
-    SUnit *Next = Instruction.SU;
+void RopSchedStrategy::releaseTopNode(SUnit *SU) {
+  MachineInstr *MI = SU->getInstr();
+  float Score = scoreInstruction(*MI);
+  ReadyQ.emplace(Score, SU);
+}
 
-    if (!Next->isScheduled) {
-      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling bottom node: ");
-      Instruction.print();
-      LLVM_DEBUG(dbgs() << " (" << ReadyQ.size() << " instructions remaining)\n");
+float RopSchedStrategy::scoreInstruction(const MachineInstr &MI) {
+  float Score = 0.0f;
 
-      IsTopNode = false;
-      return Next;
+  // Conditional operation checks.
+  if (isConditionalJump(MI)) {
+    Score += 3.0f;
+  } else if (isConditionalDataMove(MI)) {
+    Score += 2.0f;
+  } else if (isConditionalSet(MI)) {
+    Score += 1.0f;
+  }
+
+  // Register operation checks.
+  std::optional<Register> DestinationRegister = getDestinationRegister(MI);
+  bool InstructionModifiesGadgetRegister = (DestinationRegister.has_value()) ? (DestinationRegister.value().id() == GadgetRegister) : false;
+  if (isShiftOrRotate(MI)) {
+    Score += (InstructionModifiesGadgetRegister) ? 1.5f : 1.0f;
+  } else if (modifiesDataRegister(MI)) {
+    Score += (InstructionModifiesGadgetRegister) ? 1.0f : 0.5f;
+  }
+
+  // Memory write check.
+  if (writesToMemory(MI)) {
+    Score += 1.0f;
+  }
+
+  // Category-specific checks.
+  if (SUnit *ExitSU = &DAG->ExitSU; ExitSU->isInstr()) {
+    const MachineInstr &GPI = *ExitSU->getInstr();
+
+    if (GPI.isReturn() && modifiesStackPointer(MI)) {  // ROP.
+      if (isDataMove(MI) || isDataLoad(MI)) {
+        Score += 4.0f;
+      } else if (isShiftOrRotate(MI)) {
+        Score += 3.0f;
+      } else {
+        Score += 2.0f;
+      }
+    } else if ((GPI.isCall() || GPI.isBranch()) && modifiesBranchTarget(MI)) {  // JOP/COP.
+      if (isShiftOrRotate(MI)) {
+        Score += 3.0f;
+      } else {
+        Score += 2.0f;
+      }
     }
   }
 
-  return nullptr;
+  return Score;
 }
 
-void RopSchedStrategy::schedNode(SUnit *SU, bool IsTopNode) { }
+std::optional<Register> RopSchedStrategy::getDestinationRegister(const MachineInstr &MI) {
+  if (MI.getNumExplicitDefs() > 0) {
+    const MachineOperand &Operand = MI.getOperand(0);
 
-void RopSchedStrategy::releaseTopNode(SUnit *SU) {
-  if (SchedulingDirection != MISched::TopDown) {
-    return;
+    if (Operand.isReg()) {
+      return Operand.getReg();
+    }
   }
 
-  RopInstruction Instruction{SU, DAG, AssumedGadgetRegister};
-  auto it = std::lower_bound(ReadyQ.begin(), ReadyQ.end(), Instruction);
-  
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Releasing top node: ");
-  Instruction.print();
-  LLVM_DEBUG(dbgs() << "\n");
-  ReadyQ.insert(it, Instruction);
-
-  printReadyQueue();
+  return std::nullopt;
 }
 
-void RopSchedStrategy::releaseBottomNode(SUnit *SU) {
-  if (SchedulingDirection != MISched::BottomUp) {
-    return;
-  }
-
-  RopInstruction Instruction{SU, DAG, AssumedGadgetRegister};
-  auto it = std::upper_bound(ReadyQ.begin(), ReadyQ.end(), Instruction);
-  
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Releasing bottom node: ");
-  Instruction.print();
-  LLVM_DEBUG(dbgs() << "\n");
-  ReadyQ.insert(it, Instruction);
-
-  printReadyQueue();
+bool RopSchedStrategy::isConditionalJump(const MachineInstr &MI) {
+  const MCInstrDesc &Desc = MI.getDesc();
+  return Desc.isConditionalBranch();
 }
 
-void RopSchedStrategy::printReadyQueue() const {
-  size_t Size = ReadyQ.size();
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] ReadyQ (Size " << Size << "): [");
-  for (size_t i = 0; i < Size - 1; i++) {
-    ReadyQ[i].print();
-    LLVM_DEBUG(dbgs() << ", ");
+bool RopSchedStrategy::isDataMove(const MachineInstr &MI) {
+  const MCInstrDesc &Desc = MI.getDesc();
+  return Desc.isMoveImmediate() || Desc.isMoveReg();
+}
+
+bool RopSchedStrategy::isDataLoad(const MachineInstr &MI) {
+  const MCInstrDesc &Desc = MI.getDesc();
+  return Desc.mayLoad();
+}
+
+bool RopSchedStrategy::isConditionalDataMove(const MachineInstr &MI) {
+  const MCInstrDesc &Desc = MI.getDesc();
+  return isDataMove(MI) && Desc.isPredicable();
+}
+
+bool RopSchedStrategy::isConditionalSet(const MachineInstr &MI) {
+  const MCInstrDesc &Desc = MI.getDesc();
+  return Desc.isPredicable() && MI.getNumExplicitDefs() > 0;
+}
+
+bool RopSchedStrategy::isShiftOrRotate(const MachineInstr &MI) {
+  return false;
+}
+
+bool RopSchedStrategy::modifiesDataRegister(const MachineInstr &MI) {
+  return MI.getNumExplicitDefs() > 0;
+}
+
+bool RopSchedStrategy::writesToMemory(const MachineInstr &MI) {
+  const MCInstrDesc &Desc = MI.getDesc();
+  return Desc.mayStore();
+}
+
+bool RopSchedStrategy::modifiesStackPointer(const MachineInstr &MI) {
+  std::optional<Register> DestinationRegister = getDestinationRegister(MI);
+
+  if (DestinationRegister.has_value() && Register::isPhysicalRegister(DestinationRegister.value())) {
+    StringRef RegisterName = DAG->TRI->getName(DestinationRegister.value());
+    return RegisterName.contains("SP");
   }
 
-  ReadyQ[Size - 1].print();
-  LLVM_DEBUG(dbgs() << "]\n");
+  return false;
+}
+
+bool RopSchedStrategy::modifiesBranchTarget(const MachineInstr &MI) {
+  std::optional<Register> DestinationRegister = getDestinationRegister(MI);
+  return DestinationRegister.has_value() && (DestinationRegister.value().id() == GadgetRegister);
 }
 
 static ScheduleDAGInstrs *createRopMachineScheduler(MachineSchedContext *C) {
