@@ -262,6 +262,7 @@ add_llvm_component_library(LLVMCodeGen
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/CodeGen
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/CodeGen/PBQP
+  ${CAPSTONE_INCLUDE_DIRS}
 
   LINK_LIBS ${LLVM_PTHREAD_LIB} ${MLLinkDeps}
 
@@ -285,6 +286,9 @@ add_llvm_component_library(LLVMCodeGen
   Target
   TargetParser
   TransformUtils
+
+  LINK_LIBS
+  Capstone::Capstone
   )
 
 add_subdirectory(SelectionDAG)

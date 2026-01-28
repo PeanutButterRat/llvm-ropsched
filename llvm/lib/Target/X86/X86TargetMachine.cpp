@@ -52,6 +52,16 @@
 #include <optional>
 #include <string>
 
+// Extra includes for instruction lowering.
+#include "X86AsmPrinter.h"
+#include "MCTargetDesc/X86MCAsmInfo.h"
+#include "MCTargetDesc/X86EncodingOptimization.h"
+#include "llvm/CodeGen/MachineModuleInfoImpls.h"
+#include "llvm/IR/Mangler.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCStreamer.h"
+#include "llvm/MC/MCCodeEmitter.h"
+
 using namespace llvm;
 
 static cl::opt<bool> EnableMachineCombinerPass("x86-machine-combiner",
@@ -377,6 +387,585 @@ bool X86TargetMachine::isNoopAddrSpaceCast(unsigned SrcAS,
 
 void X86TargetMachine::reset() { SubtargetMap.clear(); }
 
+#undef DEBUG_TYPE
+#define DEBUG_TYPE "ropsched"
+
+// Replace TAILJMP opcodes with their equivalent opcodes that have encoding
+// information.
+static unsigned convertTailJumpOpcode(unsigned Opcode) {
+  switch (Opcode) {
+  case X86::TAILJMPr:
+    Opcode = X86::JMP32r;
+    break;
+  case X86::TAILJMPm:
+    Opcode = X86::JMP32m;
+    break;
+  case X86::TAILJMPr64:
+    Opcode = X86::JMP64r;
+    break;
+  case X86::TAILJMPm64:
+    Opcode = X86::JMP64m;
+    break;
+  case X86::TAILJMPr64_REX:
+    Opcode = X86::JMP64r_REX;
+    break;
+  case X86::TAILJMPm64_REX:
+    Opcode = X86::JMP64m_REX;
+    break;
+  case X86::TAILJMPd:
+  case X86::TAILJMPd64:
+    Opcode = X86::JMP_1;
+    break;
+  case X86::TAILJMPd_CC:
+  case X86::TAILJMPd64_CC:
+    Opcode = X86::JCC_1;
+    break;
+  }
+
+  return Opcode;
+}
+
+class X86MCInstLowerCopy {
+  MCContext &Ctx;
+  const MachineFunction &MF;
+  const TargetMachine &TM;
+  const MCAsmInfo &MAI;
+  X86AsmPrinter &AsmPrinter;
+
+public:
+  X86MCInstLowerCopy(const MachineFunction &MF, X86AsmPrinter &asmprinter);
+
+  MCOperand LowerMachineOperand(const MachineInstr *MI,
+                                const MachineOperand &MO) const;
+  void Lower(const MachineInstr *MI, MCInst &OutMI) const;
+
+  MCSymbol *GetSymbolFromOperand(const MachineOperand &MO) const;
+  MCOperand LowerSymbolOperand(const MachineOperand &MO, MCSymbol *Sym) const;
+
+private:
+  MachineModuleInfoMachO &getMachOMMI() const;
+};
+
+X86MCInstLowerCopy::X86MCInstLowerCopy(const MachineFunction &mf, X86AsmPrinter &asmprinter)
+    : Ctx(asmprinter.OutContext), MF(mf), TM(mf.getTarget()),
+      MAI(*TM.getMCAsmInfo()), AsmPrinter(asmprinter) {}
+
+MCOperand X86MCInstLowerCopy::LowerMachineOperand(const MachineInstr *MI, const MachineOperand &MO) const {
+  switch (MO.getType()) {
+  default:
+    MI->print(errs());
+    return MCOperand();  // Operands sometimes reach here for whatever reason during scheduling.
+    llvm_unreachable("unknown operand type");
+  case MachineOperand::MO_Register:
+    // Ignore all implicit register operands.
+    if (MO.isImplicit())
+      return MCOperand();
+    return MCOperand::createReg(MO.getReg());
+  case MachineOperand::MO_Immediate:
+    return MCOperand::createImm(MO.getImm());
+  case MachineOperand::MO_MachineBasicBlock:
+  case MachineOperand::MO_GlobalAddress:
+  case MachineOperand::MO_ExternalSymbol:
+    return LowerSymbolOperand(MO, GetSymbolFromOperand(MO));
+  case MachineOperand::MO_MCSymbol:
+    return LowerSymbolOperand(MO, MO.getMCSymbol());
+  case MachineOperand::MO_JumpTableIndex:
+    return MCOperand::createExpr(MCConstantExpr::create(0, Ctx));
+  case MachineOperand::MO_ConstantPoolIndex:
+    return MCOperand::createExpr(MCConstantExpr::create(0, Ctx));
+  case MachineOperand::MO_BlockAddress:
+    return MCOperand::createExpr(MCConstantExpr::create(0, Ctx));
+  case MachineOperand::MO_RegisterMask:
+    // Ignore call clobbers.
+    return MCOperand();
+  }
+}
+
+void X86MCInstLowerCopy::Lower(const MachineInstr *MI, MCInst &OutMI) const {
+  OutMI.setOpcode(MI->getOpcode());
+
+  for (const MachineOperand &MO : MI->operands())
+    if (auto Op = LowerMachineOperand(MI, MO); Op.isValid())
+      OutMI.addOperand(Op);
+
+  bool In64BitMode = true;
+  if (X86::optimizeInstFromVEX3ToVEX2(OutMI, MI->getDesc()) ||
+      X86::optimizeShiftRotateWithImmediateOne(OutMI) ||
+      X86::optimizeVPCMPWithImmediateOneOrSix(OutMI) ||
+      X86::optimizeMOVSX(OutMI) || X86::optimizeINCDEC(OutMI, In64BitMode) ||
+      X86::optimizeMOV(OutMI, In64BitMode) ||
+      X86::optimizeToFixedRegisterOrShortImmediateForm(OutMI))
+    return;
+
+  // Handle a few special cases to eliminate operand modifiers.
+  switch (OutMI.getOpcode()) {
+  case X86::LEA64_32r:
+  case X86::LEA64r:
+  case X86::LEA16r:
+  case X86::LEA32r:
+    // LEA should have a segment register, but it must be empty.
+    assert(OutMI.getNumOperands() == 1 + X86::AddrNumOperands &&
+           "Unexpected # of LEA operands");
+    assert(OutMI.getOperand(1 + X86::AddrSegmentReg).getReg() == 0 &&
+           "LEA has segment specified!");
+    break;
+  case X86::MULX32Hrr:
+  case X86::MULX32Hrm:
+  case X86::MULX64Hrr:
+  case X86::MULX64Hrm: {
+    // Turn into regular MULX by duplicating the destination.
+    unsigned NewOpc;
+    switch (OutMI.getOpcode()) {
+    default: llvm_unreachable("Invalid opcode");
+    case X86::MULX32Hrr: NewOpc = X86::MULX32rr; break;
+    case X86::MULX32Hrm: NewOpc = X86::MULX32rm; break;
+    case X86::MULX64Hrr: NewOpc = X86::MULX64rr; break;
+    case X86::MULX64Hrm: NewOpc = X86::MULX64rm; break;
+    }
+    OutMI.setOpcode(NewOpc);
+    // Duplicate the destination.
+    MCRegister DestReg = OutMI.getOperand(0).getReg();
+    OutMI.insert(OutMI.begin(), MCOperand::createReg(DestReg));
+    break;
+  }
+  // CALL64r, CALL64pcrel32 - These instructions used to have
+  // register inputs modeled as normal uses instead of implicit uses.  As such,
+  // they we used to truncate off all but the first operand (the callee). This
+  // issue seems to have been fixed at some point. This assert verifies that.
+  case X86::CALL64r:
+  case X86::CALL64pcrel32:
+    assert(OutMI.getNumOperands() == 1 && "Unexpected number of operands!");
+    break;
+  case X86::EH_RETURN:
+  case X86::EH_RETURN64: {
+    OutMI = MCInst();
+    OutMI.setOpcode(X86::RET64);
+    break;
+  }
+  case X86::CLEANUPRET: {
+    // Replace CLEANUPRET with the appropriate RET.
+    OutMI = MCInst();
+    OutMI.setOpcode(X86::RET64);
+    break;
+  }
+  case X86::CATCHRET: {
+    // Replace CATCHRET with the appropriate RET.
+    OutMI = MCInst();
+    OutMI.setOpcode(X86::RET64);
+    OutMI.addOperand(MCOperand::createReg(X86::RAX));
+    break;
+  }
+  // TAILJMPd, TAILJMPd64, TailJMPd_cc - Lower to the correct jump
+  // instruction.
+  case X86::TAILJMPr:
+  case X86::TAILJMPr64:
+  case X86::TAILJMPr64_REX:
+  case X86::TAILJMPd:
+  case X86::TAILJMPd64:
+    assert(OutMI.getNumOperands() == 1 && "Unexpected number of operands!");
+    OutMI.setOpcode(convertTailJumpOpcode(OutMI.getOpcode()));
+    break;
+  case X86::TAILJMPd_CC:
+  case X86::TAILJMPd64_CC:
+    assert(OutMI.getNumOperands() == 2 && "Unexpected number of operands!");
+    OutMI.setOpcode(convertTailJumpOpcode(OutMI.getOpcode()));
+    break;
+  case X86::TAILJMPm:
+  case X86::TAILJMPm64:
+  case X86::TAILJMPm64_REX:
+    assert(OutMI.getNumOperands() == X86::AddrNumOperands &&
+           "Unexpected number of operands!");
+    OutMI.setOpcode(convertTailJumpOpcode(OutMI.getOpcode()));
+    break;
+  case X86::MASKMOVDQU:
+  case X86::VMASKMOVDQU:
+    if (In64BitMode)
+      OutMI.setFlags(X86::IP_HAS_AD_SIZE);
+    break;
+  case X86::BSF16rm:
+  case X86::BSF16rr:
+  case X86::BSF32rm:
+  case X86::BSF32rr:
+  case X86::BSF64rm:
+  case X86::BSF64rr: {
+    // Add an REP prefix to BSF instructions so that new processors can
+    // recognize as TZCNT, which has better performance than BSF.
+    // BSF and TZCNT have different interpretations on ZF bit. So make sure
+    // it won't be used later.
+    const MachineOperand *FlagDef =
+        MI->findRegisterDefOperand(X86::EFLAGS, /*TRI=*/nullptr);
+    if (!MF.getFunction().hasOptSize() && FlagDef && FlagDef->isDead())
+      OutMI.setFlags(X86::IP_HAS_REPEAT);
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+/// GetSymbolFromOperand - Lower an MO_GlobalAddress or MO_ExternalSymbol
+/// operand to an MCSymbol.
+MCSymbol *X86MCInstLowerCopy::GetSymbolFromOperand(const MachineOperand &MO) const {
+  const Triple &TT = TM.getTargetTriple();
+  if (MO.isGlobal() && TT.isOSBinFormatELF())
+    return AsmPrinter.getSymbolPreferLocal(*MO.getGlobal());
+
+  const DataLayout &DL = MF.getDataLayout();
+  assert((MO.isGlobal() || MO.isSymbol() || MO.isMBB()) &&
+         "Isn't a symbol reference");
+
+  MCSymbol *Sym = nullptr;
+  SmallString<128> Name;
+  StringRef Suffix;
+
+  switch (MO.getTargetFlags()) {
+  case X86II::MO_DLLIMPORT:
+    // Handle dllimport linkage.
+    Name += "__imp_";
+    break;
+  case X86II::MO_COFFSTUB:
+    Name += ".refptr.";
+    break;
+  case X86II::MO_DARWIN_NONLAZY:
+  case X86II::MO_DARWIN_NONLAZY_PIC_BASE:
+    Suffix = "$non_lazy_ptr";
+    break;
+  }
+
+  if (!Suffix.empty())
+    Name += DL.getPrivateGlobalPrefix();
+
+  if (MO.isGlobal()) {
+    const GlobalValue *GV = MO.getGlobal();
+    AsmPrinter.getNameWithPrefix(Name, GV);
+  } else if (MO.isSymbol()) {
+    Mangler::getNameWithPrefix(Name, MO.getSymbolName(), DL);
+  } else if (MO.isMBB()) {
+    assert(Suffix.empty());
+    Sym = MO.getMBB()->getSymbol();
+  }
+
+  Name += Suffix;
+  if (!Sym)
+    Sym = Ctx.getOrCreateSymbol(Name);
+
+  // If the target flags on the operand changes the name of the symbol, do that
+  // before we return the symbol.
+  switch (MO.getTargetFlags()) {
+  default:
+    break;
+  case X86II::MO_COFFSTUB: {
+    MachineModuleInfoCOFF &MMICOFF =
+        AsmPrinter.MMI->getObjFileInfo<MachineModuleInfoCOFF>();
+    MachineModuleInfoImpl::StubValueTy &StubSym = MMICOFF.getGVStubEntry(Sym);
+    if (!StubSym.getPointer()) {
+      assert(MO.isGlobal() && "Extern symbol not handled yet");
+      StubSym = MachineModuleInfoImpl::StubValueTy(
+          AsmPrinter.getSymbol(MO.getGlobal()), true);
+    }
+    break;
+  }
+  case X86II::MO_DARWIN_NONLAZY:
+  case X86II::MO_DARWIN_NONLAZY_PIC_BASE: {
+    MachineModuleInfoImpl::StubValueTy &StubSym =
+        getMachOMMI().getGVStubEntry(Sym);
+    if (!StubSym.getPointer()) {
+      assert(MO.isGlobal() && "Extern symbol not handled yet");
+      StubSym = MachineModuleInfoImpl::StubValueTy(
+          AsmPrinter.getSymbol(MO.getGlobal()),
+          !MO.getGlobal()->hasInternalLinkage());
+    }
+    break;
+  }
+  }
+
+  return Sym;
+}
+
+MCOperand X86MCInstLowerCopy::LowerSymbolOperand(const MachineOperand &MO,
+                                             MCSymbol *Sym) const {
+  // FIXME: We would like an efficient form for this, so we don't have to do a
+  // lot of extra uniquing.
+  const MCExpr *Expr = nullptr;
+  uint16_t Specifier = X86::S_None;
+
+  switch (MO.getTargetFlags()) {
+  default:
+    llvm_unreachable("Unknown target flag on GV operand");
+  case X86II::MO_NO_FLAG: // No flag.
+  // These affect the name of the symbol, not any suffix.
+  case X86II::MO_DARWIN_NONLAZY:
+  case X86II::MO_DLLIMPORT:
+  case X86II::MO_COFFSTUB:
+    break;
+
+  case X86II::MO_TLVP:
+    Specifier = X86::S_TLVP;
+    break;
+  case X86II::MO_TLVP_PIC_BASE:
+    Expr = MCSymbolRefExpr::create(Sym, X86::S_TLVP, Ctx);
+    // Subtract the pic base.
+    Expr = MCBinaryExpr::createSub(
+        Expr, MCSymbolRefExpr::create(MF.getPICBaseSymbol(), Ctx), Ctx);
+    break;
+  case X86II::MO_SECREL:
+    Specifier = uint16_t(X86::S_COFF_SECREL);
+    break;
+  case X86II::MO_TLSGD:
+    Specifier = X86::S_TLSGD;
+    break;
+  case X86II::MO_TLSLD:
+    Specifier = X86::S_TLSLD;
+    break;
+  case X86II::MO_TLSLDM:
+    Specifier = X86::S_TLSLDM;
+    break;
+  case X86II::MO_GOTTPOFF:
+    Specifier = X86::S_GOTTPOFF;
+    break;
+  case X86II::MO_INDNTPOFF:
+    Specifier = X86::S_INDNTPOFF;
+    break;
+  case X86II::MO_TPOFF:
+    Specifier = X86::S_TPOFF;
+    break;
+  case X86II::MO_DTPOFF:
+    Specifier = X86::S_DTPOFF;
+    break;
+  case X86II::MO_NTPOFF:
+    Specifier = X86::S_NTPOFF;
+    break;
+  case X86II::MO_GOTNTPOFF:
+    Specifier = X86::S_GOTNTPOFF;
+    break;
+  case X86II::MO_GOTPCREL:
+    Specifier = X86::S_GOTPCREL;
+    break;
+  case X86II::MO_GOTPCREL_NORELAX:
+    Specifier = X86::S_GOTPCREL_NORELAX;
+    break;
+  case X86II::MO_GOT:
+    Specifier = X86::S_GOT;
+    break;
+  case X86II::MO_GOTOFF:
+    Specifier = X86::S_GOTOFF;
+    break;
+  case X86II::MO_PLT:
+    Specifier = X86::S_PLT;
+    break;
+  case X86II::MO_ABS8:
+    Specifier = X86::S_ABS8;
+    break;
+  case X86II::MO_PIC_BASE_OFFSET:
+  case X86II::MO_DARWIN_NONLAZY_PIC_BASE:
+    Expr = MCSymbolRefExpr::create(Sym, Ctx);
+    // Subtract the pic base.
+    Expr = MCBinaryExpr::createSub(
+        Expr, MCSymbolRefExpr::create(MF.getPICBaseSymbol(), Ctx), Ctx);
+    if (MO.isJTI()) {
+      assert(MAI.doesSetDirectiveSuppressReloc());
+      // If .set directive is supported, use it to reduce the number of
+      // relocations the assembler will generate for differences between
+      // local labels. This is only safe when the symbols are in the same
+      // section so we are restricting it to jumptable references.
+      MCSymbol *Label = Ctx.createTempSymbol();
+      AsmPrinter.OutStreamer->emitAssignment(Label, Expr);
+      Expr = MCSymbolRefExpr::create(Label, Ctx);
+    }
+    break;
+  }
+
+  if (!Expr)
+    Expr = MCSymbolRefExpr::create(Sym, Specifier, Ctx);
+
+  if (!MO.isJTI() && !MO.isMBB() && MO.getOffset())
+    Expr = MCBinaryExpr::createAdd(
+        Expr, MCConstantExpr::create(MO.getOffset(), Ctx), Ctx);
+  return MCOperand::createExpr(Expr);
+}
+
+MachineModuleInfoMachO &X86MCInstLowerCopy::getMachOMMI() const {
+  return AsmPrinter.MMI->getObjFileInfo<MachineModuleInfoMachO>();
+}
+
+class CapstoneRopSchedStrategy : public MachineSchedStrategy {
+  std::vector<SUnit *> Ready;
+  ScheduleDAGMI *DAG;
+  MCSubtargetInfo *MSTI;
+  
+  std::unique_ptr<MCContext> Context;
+  std::unique_ptr<MCCodeEmitter> Emitter;
+  std::unique_ptr<X86AsmPrinter> Printer;
+  std::unique_ptr<X86MCInstLowerCopy> Lowerer;
+
+  std::map<SUnit *, SmallVector<char, 16>> InstructionEncodings;
+  std::vector<uint8_t> Schedule;
+  Capstone CS;
+  size_t LastReturnInstr;
+  size_t LastJumpInstr;
+
+public:
+  explicit CapstoneRopSchedStrategy(const MachineSchedContext *C) 
+    : Ready(), DAG(nullptr), MSTI(nullptr), Emitter(nullptr), Lowerer(nullptr), InstructionEncodings(),
+      CS(CS_ARCH_X86, CS_MODE_64), LastReturnInstr(0), LastJumpInstr(0) {}
+
+  void initialize(ScheduleDAGMI *DAG) override {
+    this->DAG = DAG;
+    Schedule.clear();
+    LastReturnInstr = 0;
+    LastJumpInstr = 0;
+
+    const MachineFunction &MF = DAG->MF;
+    const TargetMachine &TM = MF.getTarget();
+    const Target &T = TM.getTarget();
+    const MCAsmInfo *MAI = TM.getMCAsmInfo();
+    const MCRegisterInfo *MRI = TM.getMCRegisterInfo();
+    const MCSubtargetInfo *MSTI = TM.getMCSubtargetInfo();
+    const MCInstrInfo *MCII = TM.getMCInstrInfo();
+
+    Context = std::make_unique<MCContext>(TM.getTargetTriple(), MAI, MRI, MSTI);
+    std::unique_ptr<MCStreamer> Streamer{T.createNullStreamer(*Context)};
+
+    Printer = std::make_unique<X86AsmPrinter>(const_cast<TargetMachine &>(TM), std::move(Streamer));
+    Emitter = std::unique_ptr<MCCodeEmitter>(T.createMCCodeEmitter(*MCII, *Context));
+    Lowerer = std::make_unique<X86MCInstLowerCopy>(MF, *Printer);
+  }
+
+  void enterMBB(MachineBasicBlock *MBB) override {}
+
+  SUnit *pickNode(bool &IsTopNode) override {
+    int MinimumNumberOfGadgets = std::numeric_limits<int>::max();
+    SUnit *Next = nullptr;
+
+    for (SUnit *SU : Ready) {
+      int NumberOfGadgets = countGadgets(SU);
+
+      if (NumberOfGadgets < MinimumNumberOfGadgets) {
+        Next = SU;
+        MinimumNumberOfGadgets = NumberOfGadgets;
+      }
+    }
+
+    if (Next) {
+      Ready.erase(std::find(Ready.begin(), Ready.end(), Next));
+      IsTopNode = false;
+    }
+
+    return Next;
+  }
+
+  int countGadgets(SUnit *Candidate) {
+    const SmallVector<char, 16> &Encoding = InstructionEncodings[Candidate];
+    const size_t CandidateSize = Encoding.size();
+
+    if (CandidateSize == 0) {
+      return std::numeric_limits<int>::max() - 1;
+    }
+
+    Schedule.insert(Schedule.begin(), Encoding.begin(), Encoding.end());
+
+    int GadgetCount = countGadgetsFromIndex(LastReturnInstr + CandidateSize);
+    GadgetCount += countGadgetsFromIndex(LastJumpInstr + CandidateSize);
+
+    Schedule.erase(Schedule.begin(), Schedule.begin() + CandidateSize);
+
+    return GadgetCount;
+  }
+
+  void schedNode(SUnit *SU, bool IsTopNode) override {
+    //auto Name = DAG->TII->getName(SU->getInstr()->getOpcode());
+    const SmallVector<char, 16> &Encoding = InstructionEncodings[SU];
+
+    Schedule.insert(Schedule.begin(), Encoding.begin(), Encoding.end());
+
+    LastReturnInstr = findNextReturnInstruction();
+    LastJumpInstr = findNextJumpInstruction();
+  }
+
+  size_t findNextReturnInstruction() {
+    for (size_t i = 0; i < Schedule.size(); i++) {
+      size_t AvailableBytesLeft = Schedule.size() - i;
+
+      if (Schedule[i] == 0xC3 || Schedule[i] == 0xCB 
+        || (AvailableBytesLeft >= 2 && Schedule[i] == 0xC2)
+        || (AvailableBytesLeft >= 2 && Schedule[i] == 0xCA)) {
+          return i;
+      }
+    }
+
+    return Schedule.size();
+  }
+
+  size_t findNextJumpInstruction() {
+    for (size_t i = 0; i < Schedule.size(); i++) {
+      size_t AvailableBytesLeft = Schedule.size() - i;
+
+      if ((AvailableBytesLeft >= 2 && Schedule[i] == 0xFF && (inRange(Schedule[i + 1], 0xD0, 0xD7) || inRange(Schedule[i + 1], 0xE0, 0xE7)))
+        || (AvailableBytesLeft >= 2 && Schedule[i] == 0xFF && (inRange(Schedule[i + 1], 0x10, 0x13) || inRange(Schedule[i + 1], 0x16, 0x17) || inRange(Schedule[i + 1], 0x20, 0x23) || inRange(Schedule[i + 1], 0x26, 0x27)))
+        || (AvailableBytesLeft >= 3 && Schedule[i] == 0xFF && (Schedule[i + 1] == 0x14 || Schedule[i + 1] == 0x24) && Schedule[i + 2] == 0x24)
+        || (AvailableBytesLeft >= 3 && Schedule[i] == 0xFF && (inRange(Schedule[i + 1], 0x50, 0x53) || inRange(Schedule[i + 1], 0x55, 0x57) || inRange(Schedule[i + 1], 0x60, 0x63) || inRange(Schedule[i + 1], 0x65, 0x67)))
+        || (AvailableBytesLeft >= 4 && Schedule[i] == 0xFF && (Schedule[i + 1] == 0x54 || Schedule[i + 1] == 0x64) && Schedule[i + 2] == 0x24)
+        || (AvailableBytesLeft >= 6 && Schedule[i] == 0xFF && (inRange(Schedule[i + 1], 0x90, 0x93) || inRange(Schedule[i + 1], 0x95, 0x97) || inRange(Schedule[i + 1], 0xA0, 0xA3) || inRange(Schedule[i + 1], 0xA5, 0xA7)))
+        || (AvailableBytesLeft >= 7 && Schedule[i] == 0xFF && (Schedule[i + 1] == 0x94 || Schedule[i + 1] == 0xA4) && Schedule[i + 2] == 0x24)
+
+        // See https://github.com/JonathanSalwan/ROPgadget/blob/4e5d4da5a92a723f823ee0dc00dc0cfcfabe19f1/ropgadget/gadgets.py#L249 for an explanation for these patterns.
+        || (AvailableBytesLeft >= 3 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (inRange(Schedule[i + 2], 0xD0, 0xD7) || inRange(Schedule[i + 2], 0xE0, 0xE7)))
+        || (AvailableBytesLeft >= 3 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (inRange(Schedule[i + 2], 0x10, 0x13) || inRange(Schedule[i + 2], 0x16, 0x17) || inRange(Schedule[i + 2], 0x20, 0x23) || inRange(Schedule[i + 2], 0x26, 0x27)))
+        || (AvailableBytesLeft >= 4 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (Schedule[i + 2] == 0x14 || Schedule[i + 2] == 0x24) && Schedule[i + 3] == 0x24)
+        || (AvailableBytesLeft >= 4 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (inRange(Schedule[i + 2], 0x50, 0x53) || inRange(Schedule[i + 2], 0x55, 0x57) || inRange(Schedule[i + 2], 0x60, 0x63) || inRange(Schedule[i + 2], 0x65, 0x67)))
+        || (AvailableBytesLeft >= 5 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (Schedule[i + 2] == 0x54 || Schedule[i + 1] == 0x64) && Schedule[i + 2] == 0x24)
+        || (AvailableBytesLeft >= 7 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (inRange(Schedule[i + 2], 0x90, 0x93) || inRange(Schedule[i + 2], 0x95, 0x97) || inRange(Schedule[i + 2], 0xA0, 0xA3) || inRange(Schedule[i + 2], 0xA5, 0xA7)))
+        || (AvailableBytesLeft >= 8 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (Schedule[i + 2] == 0x94 || Schedule[i + 2] == 0xA4) && Schedule[i + 3] == 0x24)
+
+        || (AvailableBytesLeft >= 2 && Schedule[i] == 0xEB)
+        || (AvailableBytesLeft >= 5 && Schedule[i] == 0xE9)) {
+          return i;
+      }
+    }
+
+    return Schedule.size();
+  }
+
+  bool inRange(uint8_t Byte, uint8_t Lower, uint8_t Higher) {
+    return Lower <= Byte && Byte <= Higher;
+  }
+
+  SmallVector<char, 16> lowerInstruction(MachineInstr *MI) {
+    MCInst MCI{};
+    SmallVector<MCFixup, 4> Fixups{};
+    SmallVector<char, 16> Bytes{};
+    Lowerer->Lower(MI, MCI);
+    Emitter->encodeInstruction(MCI, Bytes, Fixups, *DAG->MF.getTarget().getMCSubtargetInfo());
+    return Bytes;
+  }
+
+  int countGadgetsFromIndex(size_t Index) {
+    int GadgetCount = 0;
+  
+    for (size_t Depth = 1; Depth <= 10 && Depth <= Index; ++Depth) {
+        size_t Start = Index - Depth;
+        ArrayRef<uint8_t> Window{Schedule.data() + Start, Depth};
+        auto Disassembled = CS.disassemble(Window);
+
+        if (!Disassembled.empty()) {
+            GadgetCount++;
+        }
+      }
+
+      return GadgetCount;
+  }
+
+  void releaseTopNode(SUnit *SU) override {}
+
+  void releaseBottomNode(SUnit *SU) override {
+    auto Bytes = lowerInstruction(SU->getInstr());
+    InstructionEncodings[SU] = Bytes;
+    Ready.push_back(SU);
+  }
+};
+
+#undef DEBUG_TYPE
+
 struct X86PostRARopSchedStrategy : public RopSchedStrategy {
   explicit X86PostRARopSchedStrategy(const MachineSchedContext *C) : RopSchedStrategy(C) {};
 
@@ -451,7 +1040,7 @@ X86TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 
 ScheduleDAGInstrs *
 X86TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
-  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<X86PostRARopSchedStrategy>(C) : createSchedPostRA(C);
+  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<CapstoneRopSchedStrategy>(C) : createSchedPostRA(C);
   DAG->addMutation(createX86MacroFusionDAGMutation());
   return DAG;
 }

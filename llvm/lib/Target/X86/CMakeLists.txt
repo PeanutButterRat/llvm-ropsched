@@ -116,6 +116,9 @@ add_llvm_target(X86CodeGen ${sources}
 
   ADD_TO_COMPONENT
   X86
+
+  LINK_LIBS
+  Capstone::Capstone
   )
 
 add_subdirectory(AsmParser)

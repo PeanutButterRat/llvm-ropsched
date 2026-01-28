@@ -100,6 +100,10 @@
 #include <vector>
 #include <optional>
 
+extern "C" {
+#include <capstone/capstone.h>
+}
+
 namespace llvm {
 namespace impl_detail {
 // FIXME: Remove these declarations once RegisterClassInfo is queryable as an
@@ -1388,6 +1392,55 @@ protected:
 // RopSchedStrategy - Return-oriented programming defensive scheduler.
 //===----------------------------------------------------------------------===//
 
+struct CsInstr {
+  unsigned int id;
+  std::string mnemonic;
+
+  CsInstr(cs_insn instr) : id(instr.id), mnemonic(instr.mnemonic) {}
+};
+
+class Capstone {
+  csh Handle = 00;
+
+public:
+  Capstone(cs_arch Architecture, cs_mode Mode) {
+    cs_err Error = cs_open(Architecture, Mode, &Handle);
+    assert((Error == CS_ERR_OK) && "Failed to instantiate Capstone engine.");
+  }
+
+  ~Capstone() {
+    if (Handle) {
+      cs_close(&Handle);
+    }
+  }
+
+  std::vector<CsInstr> disassemble(const std::vector<uint8_t> &Bytes) const {
+    std::vector<CsInstr> Disassembled{};
+
+    if (Handle && Bytes.size() > 0) {
+      size_t Count = 0;
+      cs_insn *Instructions;
+      Count = cs_disasm(Handle, Bytes.data(), Bytes.size(), 0, 0, &Instructions);
+
+      if (Count > 0) {
+        Disassembled.reserve(Count);
+
+        for (size_t i = 0; i < Count; i++) {
+          Disassembled.emplace_back(Instructions[i]);
+        }
+
+        cs_free(Instructions, Count);
+      }
+    }
+
+    return Disassembled;
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// RopSchedStrategy - Return-oriented programming defensive scheduler.
+//===----------------------------------------------------------------------===//
+
 class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
   using RopInstruction = std::pair<float, SUnit *>;
 
@@ -1405,7 +1458,9 @@ protected:
   ScheduleDAGMI *DAG = nullptr;
 
 public:
-  explicit RopSchedStrategy(const MachineSchedContext *C) {}
+  explicit RopSchedStrategy(const MachineSchedContext *C) {
+    Capstone CS{CS_ARCH_X86, CS_MODE_64};
+  }
 
   void initialize(ScheduleDAGMI *DAG) override;
 
