@@ -803,17 +803,19 @@ class CapstoneRopSchedStrategy : public MachineSchedStrategy {
   Capstone CS;
   size_t LastReturnInstr;
   size_t LastJumpInstr;
+  size_t LastCallInstr;
 
 public:
   explicit CapstoneRopSchedStrategy(const MachineSchedContext *C) 
     : Ready(), DAG(nullptr), MSTI(nullptr), Emitter(nullptr), Lowerer(nullptr), InstructionEncodings(),
-      CS(CS_ARCH_X86, CS_MODE_64), LastReturnInstr(0), LastJumpInstr(0) {}
+      CS(CS_ARCH_X86, CS_MODE_64), LastReturnInstr(0), LastJumpInstr(0), LastCallInstr(0) {}
 
   void initialize(ScheduleDAGMI *DAG) override {
     this->DAG = DAG;
     Schedule.clear();
     LastReturnInstr = 0;
     LastJumpInstr = 0;
+    LastCallInstr = 0;
 
     const MachineFunction &MF = DAG->MF;
     const TargetMachine &TM = MF.getTarget();
@@ -866,6 +868,7 @@ public:
 
     int GadgetCount = countGadgetsFromIndex(LastReturnInstr + CandidateSize);
     GadgetCount += countGadgetsFromIndex(LastJumpInstr + CandidateSize);
+    GadgetCount += countGadgetsFromIndex(LastCallInstr + CandidateSize);
 
     Schedule.erase(Schedule.begin(), Schedule.begin() + CandidateSize);
 
@@ -873,13 +876,13 @@ public:
   }
 
   void schedNode(SUnit *SU, bool IsTopNode) override {
-    //auto Name = DAG->TII->getName(SU->getInstr()->getOpcode());
     const SmallVector<char, 16> &Encoding = InstructionEncodings[SU];
 
     Schedule.insert(Schedule.begin(), Encoding.begin(), Encoding.end());
 
     LastReturnInstr = findNextReturnInstruction();
     LastJumpInstr = findNextJumpInstruction();
+    LastCallInstr = findNextCallInstruction();
   }
 
   size_t findNextReturnInstruction() {
@@ -900,25 +903,51 @@ public:
     for (size_t i = 0; i < Schedule.size(); i++) {
       size_t AvailableBytesLeft = Schedule.size() - i;
 
-      if ((AvailableBytesLeft >= 2 && Schedule[i] == 0xFF && (inRange(Schedule[i + 1], 0xD0, 0xD7) || inRange(Schedule[i + 1], 0xE0, 0xE7)))
-        || (AvailableBytesLeft >= 2 && Schedule[i] == 0xFF && (inRange(Schedule[i + 1], 0x10, 0x13) || inRange(Schedule[i + 1], 0x16, 0x17) || inRange(Schedule[i + 1], 0x20, 0x23) || inRange(Schedule[i + 1], 0x26, 0x27)))
-        || (AvailableBytesLeft >= 3 && Schedule[i] == 0xFF && (Schedule[i + 1] == 0x14 || Schedule[i + 1] == 0x24) && Schedule[i + 2] == 0x24)
-        || (AvailableBytesLeft >= 3 && Schedule[i] == 0xFF && (inRange(Schedule[i + 1], 0x50, 0x53) || inRange(Schedule[i + 1], 0x55, 0x57) || inRange(Schedule[i + 1], 0x60, 0x63) || inRange(Schedule[i + 1], 0x65, 0x67)))
-        || (AvailableBytesLeft >= 4 && Schedule[i] == 0xFF && (Schedule[i + 1] == 0x54 || Schedule[i + 1] == 0x64) && Schedule[i + 2] == 0x24)
-        || (AvailableBytesLeft >= 6 && Schedule[i] == 0xFF && (inRange(Schedule[i + 1], 0x90, 0x93) || inRange(Schedule[i + 1], 0x95, 0x97) || inRange(Schedule[i + 1], 0xA0, 0xA3) || inRange(Schedule[i + 1], 0xA5, 0xA7)))
-        || (AvailableBytesLeft >= 7 && Schedule[i] == 0xFF && (Schedule[i + 1] == 0x94 || Schedule[i + 1] == 0xA4) && Schedule[i + 2] == 0x24)
+      if (((AvailableBytesLeft >= 2) && (Schedule[i] == 0xFF) && (inRange(Schedule[i + 1], 0xE0, 0xE7)))
+        || ((AvailableBytesLeft >= 2) && (Schedule[i] == 0xFF) && (inRange(Schedule[i + 1], 0x20, 0x23) || inRange(Schedule[i + 1], 0x26, 0x27)))
+        || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0xFF) && (Schedule[i + 1] == 0x24) && (Schedule[i + 2] == 0x24))
+        || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0xFF) && (inRange(Schedule[i + 1], 0x60, 0x63) || inRange(Schedule[i + 1], 0x65, 0x67)))
+        || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0xFF) && (Schedule[i + 1] == 0x64) && (Schedule[i + 2] == 0x24))
+        || ((AvailableBytesLeft >= 6) && (Schedule[i] == 0xFF) && (inRange(Schedule[i + 1], 0xA0, 0xA3) || inRange(Schedule[i + 1], 0xA5, 0xA7)))
+        || ((AvailableBytesLeft >= 7) && (Schedule[i] == 0xFF) && (Schedule[i + 1] == 0xA4) && (Schedule[i + 2] == 0x24))
 
         // See https://github.com/JonathanSalwan/ROPgadget/blob/4e5d4da5a92a723f823ee0dc00dc0cfcfabe19f1/ropgadget/gadgets.py#L249 for an explanation for these patterns.
-        || (AvailableBytesLeft >= 3 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (inRange(Schedule[i + 2], 0xD0, 0xD7) || inRange(Schedule[i + 2], 0xE0, 0xE7)))
-        || (AvailableBytesLeft >= 3 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (inRange(Schedule[i + 2], 0x10, 0x13) || inRange(Schedule[i + 2], 0x16, 0x17) || inRange(Schedule[i + 2], 0x20, 0x23) || inRange(Schedule[i + 2], 0x26, 0x27)))
-        || (AvailableBytesLeft >= 4 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (Schedule[i + 2] == 0x14 || Schedule[i + 2] == 0x24) && Schedule[i + 3] == 0x24)
-        || (AvailableBytesLeft >= 4 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (inRange(Schedule[i + 2], 0x50, 0x53) || inRange(Schedule[i + 2], 0x55, 0x57) || inRange(Schedule[i + 2], 0x60, 0x63) || inRange(Schedule[i + 2], 0x65, 0x67)))
-        || (AvailableBytesLeft >= 5 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (Schedule[i + 2] == 0x54 || Schedule[i + 1] == 0x64) && Schedule[i + 2] == 0x24)
-        || (AvailableBytesLeft >= 7 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (inRange(Schedule[i + 2], 0x90, 0x93) || inRange(Schedule[i + 2], 0x95, 0x97) || inRange(Schedule[i + 2], 0xA0, 0xA3) || inRange(Schedule[i + 2], 0xA5, 0xA7)))
-        || (AvailableBytesLeft >= 8 && Schedule[i] == 0x41 && Schedule[i + 1] == 0xFF && (Schedule[i + 2] == 0x94 || Schedule[i + 2] == 0xA4) && Schedule[i + 3] == 0x24)
+        || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0xE0, 0xE7)))
+        || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x20, 0x23) || inRange(Schedule[i + 2], 0x26, 0x27)))
+        || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x24) && (Schedule[i + 3] == 0x24))
+        || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x60, 0x63) || inRange(Schedule[i + 2], 0x65, 0x67)))
+        || ((AvailableBytesLeft >= 5) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 1] == 0x64) && (Schedule[i + 2] == 0x24))
+        || ((AvailableBytesLeft >= 7) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0xA0, 0xA3) || inRange(Schedule[i + 2], 0xA5, 0xA7)))
+        || ((AvailableBytesLeft >= 8) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0xA4) && (Schedule[i + 3] == 0x24))
 
-        || (AvailableBytesLeft >= 2 && Schedule[i] == 0xEB)
-        || (AvailableBytesLeft >= 5 && Schedule[i] == 0xE9)) {
+        || ((AvailableBytesLeft >= 2) && (Schedule[i] == 0xEB))
+        || ((AvailableBytesLeft >= 5) && (Schedule[i] == 0xE9))) {
+          return i;
+      }
+    }
+
+    return Schedule.size();
+  }
+
+  size_t findNextCallInstruction() {
+    for (size_t i = 0; i < Schedule.size(); i++) {
+      size_t AvailableBytesLeft = Schedule.size() - i;
+
+      if (((AvailableBytesLeft >= 2) && (Schedule[i] == 0xFF) && inRange(Schedule[i + 1], 0xD0, 0xD7))
+        || ((AvailableBytesLeft >= 2) && (Schedule[i] == 0xFF) && (inRange(Schedule[i + 1], 0x10, 0x13) || inRange(Schedule[i + 1], 0x16, 0x17)))
+        || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0xFF) && (Schedule[i + 1] == 0x14) && (Schedule[i + 2] == 0x24))
+        || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0xFF) && (inRange(Schedule[i + 1], 0x50, 0x53) || inRange(Schedule[i + 1], 0x55, 0x57)))
+        || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0xFF) && (Schedule[i + 1] == 0x54) && Schedule[i + 2] == 0x24)
+        || ((AvailableBytesLeft >= 6) && (Schedule[i] == 0xFF) && (inRange(Schedule[i + 1], 0x90, 0x93) || inRange(Schedule[i + 1], 0x95, 0x97)))
+        || ((AvailableBytesLeft >= 7) && (Schedule[i] == 0xFF) && (Schedule[i + 1] == 0x94) && Schedule[i + 2] == 0x24)
+
+        || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0xD0, 0xD7)))
+        || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x10, 0x13) || inRange(Schedule[i + 2], 0x16, 0x17)))
+        || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x14) && (Schedule[i + 3] == 0x24))
+        || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x50, 0x53) || inRange(Schedule[i + 2], 0x55, 0x57)))
+        || ((AvailableBytesLeft >= 5) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x54) && (Schedule[i + 2] == 0x24))
+        || ((AvailableBytesLeft >= 7) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x90, 0x93) || inRange(Schedule[i + 2], 0x95, 0x97)))
+        || ((AvailableBytesLeft >= 8) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x94) && (Schedule[i + 3] == 0x24))) {
           return i;
       }
     }
