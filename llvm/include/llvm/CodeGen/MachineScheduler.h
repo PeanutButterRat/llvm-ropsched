@@ -1499,6 +1499,97 @@ public:
   virtual bool modifiesBranchTarget(const MachineInstr &MI);
 };
 
+//===----------------------------------------------------------------------===//
+// RopInstruction - Helper class for RopSchedStrategy.
+//===----------------------------------------------------------------------===//
+
+enum InstrCategory {
+  DataMove,
+  Arithmetic,
+  ShiftAndRotate,
+  Misc,
+};
+
+enum InstrDestReg {
+  StackPointer,
+  GadgetRegister,
+  Other,
+};
+
+struct RopInstruction {
+  SUnit *SU;
+  ScheduleDAGMI *DAG;
+
+  StringRef Name;
+  std::optional<unsigned> AssumedGadgetRegister = std::nullopt;
+  InstrCategory Category;
+  InstrDestReg DestReg;
+  std::vector<std::string> Destinations;
+  float Score;
+
+  RopInstruction(SUnit *SU, ScheduleDAGMI *DAG, std::optional<unsigned> AssumedGadgetRegister = std::nullopt);
+
+  bool operator<(const RopInstruction& Other) const;
+
+  float calculateScore();
+
+  InstrCategory getInstrCategory() const;
+
+  InstrDestReg getInstrDestReg();
+
+  void print() const;
+
+  static std::string toString(InstrCategory Category) {
+    switch (Category) {
+      case InstrCategory::DataMove: return "DataMove";
+      case InstrCategory::Arithmetic: return "Arithmetic";
+      case InstrCategory::ShiftAndRotate: return "ShiftAndRotate";
+      case InstrCategory::Misc: return "Misc";
+      default: return "Unknown";
+    }
+  }
+
+  static std::string toString(InstrDestReg DestReg) {
+    switch (DestReg) {
+      case InstrDestReg::StackPointer: return "StackPointer";
+      case InstrDestReg::GadgetRegister: return "GadgetRegister";
+      case InstrDestReg::Other: return "Other";
+      default: return "Unknown";
+    }
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// RopSchedStrategy - Return-oriented programming defensive scheduler.
+//===----------------------------------------------------------------------===//
+
+class LLVM_ABI OldRopSchedStrategy : public MachineSchedStrategy {
+  std::optional<unsigned> AssumedGadgetRegister = std::nullopt;
+  unsigned NumberOfInstructionsScheduled = 0;
+  MISched::Direction SchedulingDirection = MISched::TopDown;
+  ScheduleDAGMI *DAG = nullptr;
+  std::vector<RopInstruction> ReadyQ{};
+
+public:
+  explicit OldRopSchedStrategy(const MachineSchedContext *C);
+
+  void initialize(ScheduleDAGMI *DAG) override;
+
+  SUnit *pickNode(bool &IsTopNode) override;
+
+  SUnit *pickTopNode(bool &IsTopNode);
+
+  SUnit *pickBottomNode(bool &IsTopNode);
+
+  void schedNode(SUnit *SU, bool IsTopNode) override;
+
+  void releaseTopNode(SUnit *SU) override;
+
+  void releaseBottomNode(SUnit *SU) override;
+
+  void printReadyQueue() const;
+};
+
 /// If ReorderWhileClustering is set to true, no attempt will be made to
 /// reduce reordering due to store clustering.
 LLVM_ABI std::unique_ptr<ScheduleDAGMutation>
