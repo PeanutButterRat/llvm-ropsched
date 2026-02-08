@@ -890,8 +890,8 @@ public:
       size_t AvailableBytesLeft = Schedule.size() - i;
 
       if (Schedule[i] == 0xC3 || Schedule[i] == 0xCB 
-        || (AvailableBytesLeft >= 2 && Schedule[i] == 0xC2)
-        || (AvailableBytesLeft >= 2 && Schedule[i] == 0xCA)) {
+        || (AvailableBytesLeft >= 3 && Schedule[i] == 0xC2)
+        || (AvailableBytesLeft >= 3 && Schedule[i] == 0xCA)) {
           return i;
       }
     }
