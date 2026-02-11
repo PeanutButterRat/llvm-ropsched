@@ -916,7 +916,7 @@ public:
         || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x20, 0x23) || inRange(Schedule[i + 2], 0x26, 0x27)))
         || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x24) && (Schedule[i + 3] == 0x24))
         || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x60, 0x63) || inRange(Schedule[i + 2], 0x65, 0x67)))
-        || ((AvailableBytesLeft >= 5) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 1] == 0x64) && (Schedule[i + 2] == 0x24))
+        || ((AvailableBytesLeft >= 5) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x64) && (Schedule[i + 3] == 0x24))
         || ((AvailableBytesLeft >= 7) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0xA0, 0xA3) || inRange(Schedule[i + 2], 0xA5, 0xA7)))
         || ((AvailableBytesLeft >= 8) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0xA4) && (Schedule[i + 3] == 0x24))
 
@@ -945,7 +945,7 @@ public:
         || ((AvailableBytesLeft >= 3) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x10, 0x13) || inRange(Schedule[i + 2], 0x16, 0x17)))
         || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x14) && (Schedule[i + 3] == 0x24))
         || ((AvailableBytesLeft >= 4) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x50, 0x53) || inRange(Schedule[i + 2], 0x55, 0x57)))
-        || ((AvailableBytesLeft >= 5) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x54) && (Schedule[i + 2] == 0x24))
+        || ((AvailableBytesLeft >= 5) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x54) && (Schedule[i + 3] == 0x24))
         || ((AvailableBytesLeft >= 7) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (inRange(Schedule[i + 2], 0x90, 0x93) || inRange(Schedule[i + 2], 0x95, 0x97)))
         || ((AvailableBytesLeft >= 8) && (Schedule[i] == 0x41) && (Schedule[i + 1] == 0xFF) && (Schedule[i + 2] == 0x94) && (Schedule[i + 3] == 0x24))) {
           return i;
