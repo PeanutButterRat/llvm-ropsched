@@ -288,7 +288,7 @@ add_llvm_component_library(LLVMCodeGen
   TransformUtils
 
   LINK_LIBS
-  Capstone::Capstone
+  ${CAPSTONE_LIBRARIES}
   )
 
 add_subdirectory(SelectionDAG)

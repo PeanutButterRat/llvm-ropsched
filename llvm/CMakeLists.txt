@@ -4,12 +4,6 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CAPSTONE REQUIRED capstone)
 
-add_library(Capstone::Capstone INTERFACE IMPORTED)
-set_target_properties(Capstone::Capstone PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "${CAPSTONE_INCLUDE_DIRS}"
-  INTERFACE_LINK_LIBRARIES "${CAPSTONE_LIBRARIES}"
-)
-
 include(CMakeDependentOption)
 
 set(LLVM_COMMON_CMAKE_UTILS ${CMAKE_CURRENT_SOURCE_DIR}/../cmake)
