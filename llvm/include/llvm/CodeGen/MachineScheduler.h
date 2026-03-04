@@ -1536,27 +1536,6 @@ struct RopInstruction {
   InstrCategory getInstrCategory() const;
 
   InstrDestReg getInstrDestReg();
-
-  void print() const;
-
-  static std::string toString(InstrCategory Category) {
-    switch (Category) {
-      case InstrCategory::DataMove: return "DataMove";
-      case InstrCategory::Arithmetic: return "Arithmetic";
-      case InstrCategory::ShiftAndRotate: return "ShiftAndRotate";
-      case InstrCategory::Misc: return "Misc";
-      default: return "Unknown";
-    }
-  }
-
-  static std::string toString(InstrDestReg DestReg) {
-    switch (DestReg) {
-      case InstrDestReg::StackPointer: return "StackPointer";
-      case InstrDestReg::GadgetRegister: return "GadgetRegister";
-      case InstrDestReg::Other: return "Other";
-      default: return "Unknown";
-    }
-  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -1565,8 +1544,6 @@ struct RopInstruction {
 
 class LLVM_ABI OldRopSchedStrategy : public MachineSchedStrategy {
   std::optional<unsigned> AssumedGadgetRegister = std::nullopt;
-  unsigned NumberOfInstructionsScheduled = 0;
-  MISched::Direction SchedulingDirection = MISched::TopDown;
   ScheduleDAGMI *DAG = nullptr;
   std::vector<RopInstruction> ReadyQ{};
 

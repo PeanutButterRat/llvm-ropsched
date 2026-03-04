@@ -808,7 +808,9 @@ class CapstoneRopSchedStrategy : public MachineSchedStrategy {
 public:
   explicit CapstoneRopSchedStrategy(const MachineSchedContext *C) 
     : Ready(), DAG(nullptr), MSTI(nullptr), Emitter(nullptr), Lowerer(nullptr), InstructionEncodings(),
-      CS(CS_ARCH_X86, CS_MODE_64), LastReturnInstr(0), LastJumpInstr(0), LastCallInstr(0) {}
+      CS(CS_ARCH_X86, CS_MODE_64), LastReturnInstr(0), LastJumpInstr(0), LastCallInstr(0) {
+          LLVM_DEBUG(dbgs() << "[CapstoneRopSchedStrategy] Instantiated\n");
+      }
 
   void initialize(ScheduleDAGMI *DAG) override {
     this->DAG = DAG;
@@ -866,7 +868,7 @@ public:
 
     Schedule.insert(Schedule.begin(), Encoding.begin(), Encoding.end());
 
-    int GadgetCount = countGadgetsFromIndex(LastReturnInstr + CandidateSize);
+    int GadgetCount = countGadgetsFromIndex(LastJumpInstr + CandidateSize);
     GadgetCount += countGadgetsFromIndex(LastJumpInstr + CandidateSize);
     GadgetCount += countGadgetsFromIndex(LastCallInstr + CandidateSize);
 

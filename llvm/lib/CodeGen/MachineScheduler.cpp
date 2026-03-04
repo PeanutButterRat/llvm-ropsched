@@ -4864,59 +4864,22 @@ InstrDestReg RopInstruction::getInstrDestReg() {
   return Destination;
 }
 
-void RopInstruction::print() const {
-  LLVM_DEBUG({
-    dbgs() << Name << " [" << toString(Category) << ", " << toString(DestReg);
-
-    dbgs() << " (";
-    for (size_t i = 0; i < Destinations.size(); i++) {
-      dbgs() << Destinations[i];
-      if (i + 1 < Destinations.size())
-        dbgs() << ", ";
-    }
-    dbgs() << ")]";
-
-    dbgs() << " -> (" << llvm::format("%.2f", Score) << ")";
-  });
-}
-
 //===----------------------------------------------------------------------===//
 // RopSchedStrategy - Return-oriented programming defensive scheduler.
 //===----------------------------------------------------------------------===//
 
 OldRopSchedStrategy::OldRopSchedStrategy(const MachineSchedContext *C) {
-  const char *Direction = "Top-Down";
-
-  if (PreRADirection == MISched::BottomUp || PostRADirection == MISched::BottomUp) {
-    Direction = "Bottom-Up";
-    SchedulingDirection = MISched::BottomUp;
-  }
-
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Instantiated (" << Direction << ")\n");
+  LLVM_DEBUG(dbgs() << "[OldRopSchedStrategy] Instantiated\n");
 }
 
 void OldRopSchedStrategy::initialize(ScheduleDAGMI *DAG) {
   this->DAG = DAG;
   ReadyQ.clear();
   AssumedGadgetRegister = std::nullopt;
-  SUnit *SU = &DAG->ExitSU;
-
-  if (SU->isInstr()) {
-    RopInstruction Instruction{SU, DAG, AssumedGadgetRegister};
-    LLVM_DEBUG(dbgs() << "\n[RopSchedStrategy] Starting new MBB, ExitSU: ");
-    Instruction.print();
-    LLVM_DEBUG(dbgs() << "\n");
-  }
-
-  if (NumberOfInstructionsScheduled > 0) {
-    LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduled " << NumberOfInstructionsScheduled << " in the last block\n");
-    NumberOfInstructionsScheduled = 0;
-  }
 }
 
 SUnit *OldRopSchedStrategy::pickNode(bool &IsTopNode) {
-  SUnit *Next = (SchedulingDirection == MISched::TopDown) ? pickTopNode(IsTopNode) : pickBottomNode(IsTopNode);
-  NumberOfInstructionsScheduled++;
+  SUnit *Next = pickTopNode(IsTopNode);
 
   if (!Next) {
     return nullptr;
@@ -4943,9 +4906,6 @@ SUnit *OldRopSchedStrategy::pickNode(bool &IsTopNode) {
           const StringRef Name { DAG->TRI->getName(AssumedGadgetRegister.value()) };
           AssumedGadgetRegisterName = Name.str();
       }
-      if (AssumedGadgetRegister.has_value()) {
-        LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Assigned destination register: " << AssumedGadgetRegisterName << "\n");
-      }
     }
   }
 
@@ -4959,30 +4919,7 @@ SUnit *OldRopSchedStrategy::pickTopNode(bool &IsTopNode) {
     SUnit *Next = Instruction.SU;
 
     if (!Next->isScheduled) {
-      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling top node: ");
-      Instruction.print();
-      LLVM_DEBUG(dbgs() << " (" << ReadyQ.size() << " instruction(s) remaining)\n");
-
       IsTopNode = true;
-      return Next;
-    }
-  }
-
-  return nullptr;
-}
-
-SUnit *OldRopSchedStrategy::pickBottomNode(bool &IsTopNode) {
-  while (!ReadyQ.empty()) {
-    RopInstruction Instruction = ReadyQ.back();
-    ReadyQ.pop_back();
-    SUnit *Next = Instruction.SU;
-
-    if (!Next->isScheduled) {
-      LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Scheduling bottom node: ");
-      Instruction.print();
-      LLVM_DEBUG(dbgs() << " (" << ReadyQ.size() << " instructions remaining)\n");
-
-      IsTopNode = false;
       return Next;
     }
   }
@@ -4993,48 +4930,12 @@ SUnit *OldRopSchedStrategy::pickBottomNode(bool &IsTopNode) {
 void OldRopSchedStrategy::schedNode(SUnit *SU, bool IsTopNode) { }
 
 void OldRopSchedStrategy::releaseTopNode(SUnit *SU) {
-  if (SchedulingDirection != MISched::TopDown) {
-    return;
-  }
-
   RopInstruction Instruction{SU, DAG, AssumedGadgetRegister};
   auto it = std::lower_bound(ReadyQ.begin(), ReadyQ.end(), Instruction);
-  
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Releasing top node: ");
-  Instruction.print();
-  LLVM_DEBUG(dbgs() << "\n");
   ReadyQ.insert(it, Instruction);
-
-  printReadyQueue();
 }
 
-void OldRopSchedStrategy::releaseBottomNode(SUnit *SU) {
-  if (SchedulingDirection != MISched::BottomUp) {
-    return;
-  }
-
-  RopInstruction Instruction{SU, DAG, AssumedGadgetRegister};
-  auto it = std::upper_bound(ReadyQ.begin(), ReadyQ.end(), Instruction);
-  
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] Releasing bottom node: ");
-  Instruction.print();
-  LLVM_DEBUG(dbgs() << "\n");
-  ReadyQ.insert(it, Instruction);
-
-  printReadyQueue();
-}
-
-void OldRopSchedStrategy::printReadyQueue() const {
-  size_t Size = ReadyQ.size();
-  LLVM_DEBUG(dbgs() << "[RopSchedStrategy] ReadyQ (Size " << Size << "): [");
-  for (size_t i = 0; i < Size - 1; i++) {
-    ReadyQ[i].print();
-    LLVM_DEBUG(dbgs() << ", ");
-  }
-
-  ReadyQ[Size - 1].print();
-  LLVM_DEBUG(dbgs() << "]\n");
-}
+void OldRopSchedStrategy::releaseBottomNode(SUnit *SU) { }
 
 static ScheduleDAGInstrs *createRopMachineScheduler(MachineSchedContext *C) {
   return new ScheduleDAGMILive(C, std::make_unique<OldRopSchedStrategy>(C));
