@@ -1567,6 +1567,135 @@ public:
   void printReadyQueue() const;
 };
 
+
+//===----------------------------------------------------------------------===//
+// TrieRopSchedStrategy - A trie-based return-oriented programming defensive 
+// scheduler.
+// 
+// The rationale behind this scheduler is that, once a gadget finds it's way
+// into a program during scheudling, the "cost has already been paid" for that
+// particular sequence of instructions. An attacker is only concerned with
+// *unique* gadgets because, duplicates of the same gadget offer no benefit
+// when mounting an ROP attack. This means, in theory, if you schedule the
+// endings of basic blocks the same way, you could eliminate some unique
+// gadgets. The data structure of choice here is the trie where instead of
+// of letters in a string, we track instructions in basic blocks and perform
+// bottom-up scheduling.
+//===----------------------------------------------------------------------===//
+
+// This is a helper class that stores data for comparision between instructions
+// when determining next instruction to schedule. Since MachineInstr doesn't override
+// the equality operator, we are left to compare two instructions as best we can.
+struct MachineInstrComparisonData {
+  uint16_t Opcode;
+  uint32_t NumberOfOperands;
+
+  MachineInstrComparisonData(const MachineInstr *MI) : Opcode(MI->getOpcode()), NumberOfOperands(MI->getNumOperands()) {}
+  MachineInstrComparisonData() : Opcode(0), NumberOfOperands(0) {}
+
+  // The equality operator is quite wide and probably matches with a lot of
+  // non-equivalent instructions, but I'm not sure tightening it up will improve the
+  // results anyways...
+  bool operator==(const MachineInstrComparisonData &Other) const {
+    return Opcode == Other.Opcode && NumberOfOperands == Other.NumberOfOperands;
+  }
+};
+
+struct MachineInstrTrieNode {
+  const MachineInstrComparisonData Data;
+  std::vector<MachineInstrTrieNode *> Children;
+
+  explicit MachineInstrTrieNode(const MachineInstr* MI)
+  : Data(MI), Children() { }
+
+  explicit MachineInstrTrieNode()  // Default constructor for the root node.
+  : Data(), Children() { }
+
+  // Returns a matching child if there is one. Otherwise, it returns a nullptr.
+  MachineInstrTrieNode *get(const MachineInstr *Node) {
+    MachineInstrComparisonData NodeData{Node};
+
+    for (MachineInstrTrieNode *Child : Children) {
+      if (NodeData == Child->Data) {
+        return Child;
+      }
+    }
+
+    return nullptr;
+  }
+
+  // Inserts a child if there doesn't exist a matching one already and returns
+  // a reference to said child node.
+  MachineInstrTrieNode *insert(const MachineInstr *Node) {
+    MachineInstrTrieNode *Child = get(Node);
+
+    if (!Child) {
+      Child = new MachineInstrTrieNode{Node};
+      Children.push_back(Child);
+    }
+
+    return Child;
+  }
+};
+
+// This is a global trie used to track all "scheudling suffixes" accross the entire
+// compilation of the program. It definitely leaks memory since no cleanup is performed,
+// but that doesn't really matter for research purposes.
+static MachineInstrTrieNode BasicBlockSuffixes;
+
+class TrieRopSchedStrategy : public MachineSchedStrategy {
+  std::vector<SUnit *> ReadyQ;
+  MachineInstrTrieNode *LastInstructionScheduled;
+
+public:
+  explicit TrieRopSchedStrategy(const MachineSchedContext *C)
+    : ReadyQ(), LastInstructionScheduled(&BasicBlockSuffixes) {
+  }
+
+  void enterMBB(MachineBasicBlock *MBB) override {
+    LastInstructionScheduled = &BasicBlockSuffixes;  // Reset the scheduling sequence for each new BB.
+  }
+
+  void initialize(ScheduleDAGMI *DAG) override {
+    ReadyQ.clear();
+  }
+
+  void releaseBottomNode(SUnit *SU) override {
+    ReadyQ.push_back(SU);
+  }
+
+  SUnit *pickNode(bool &IsTopNode) override {
+    int MaximumNumberOfChildren = std::numeric_limits<int>::min();
+    SUnit *Next = nullptr;
+
+    // Nodes are scheduled based on the following priority:
+    //   1. If a path exists already, choose that.
+    //   2. If multiple paths exist, choose the one that has the most children for the next scheduling choice.
+    //   3. Make a new path and insert a new node.
+    for (SUnit * SU : ReadyQ) {
+      auto NextNode = LastInstructionScheduled->get(SU->getInstr());
+      int NumberOfChildren = (NextNode) ? NextNode->Children.size(): -1;  // New paths have a value of -1 to have the lowest priority.
+
+      if (NumberOfChildren > MaximumNumberOfChildren) {
+        MaximumNumberOfChildren = NumberOfChildren;
+        Next = SU;
+      }
+    }
+
+    if (Next) {
+      ReadyQ.erase(std::find(ReadyQ.begin(), ReadyQ.end(), Next));
+      IsTopNode = false;
+      LastInstructionScheduled = LastInstructionScheduled->insert(Next->getInstr());  // This also creates a new path if it doesn't exist.
+    }
+
+    return Next;
+  }
+
+  void schedNode(SUnit *SU, bool IsTopNode) override { }
+
+  void releaseTopNode(SUnit *SU) override { }
+};
+
 /// If ReorderWhileClustering is set to true, no attempt will be made to
 /// reduce reordering due to store clustering.
 LLVM_ABI std::unique_ptr<ScheduleDAGMutation>

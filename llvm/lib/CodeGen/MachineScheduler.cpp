@@ -4945,6 +4945,14 @@ static MachineSchedRegistry RopSchedRegistry(
   "ropsched", "Return-oriented programming defensive scheduler.",
   createRopMachineScheduler);
 
+static ScheduleDAGInstrs *createTrieRopMachineScheduler(MachineSchedContext *C) {
+  return new ScheduleDAGMILive(C, std::make_unique<OldRopSchedStrategy>(C));
+}
+
+static MachineSchedRegistry TrieRopSchedRegistry(
+  "trie-ropsched", "Trie-based return-oriented programming defensive scheduler.",
+  createTrieRopMachineScheduler);
+
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "machine-scheduler"
 
