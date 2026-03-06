@@ -997,8 +997,8 @@ public:
 
 #undef DEBUG_TYPE
 
-struct X86PostRARopSchedStrategy : public RopSchedStrategy {
-  explicit X86PostRARopSchedStrategy(const MachineSchedContext *C) : RopSchedStrategy(C) {};
+struct X86PostRARopSchedStrategy : public ExtendedScoreRopSchedStrategy {
+  explicit X86PostRARopSchedStrategy(const MachineSchedContext *C) : ExtendedScoreRopSchedStrategy(C) {};
 
   bool isConditionalDataMove(const MachineInstr &MI) override {
     switch (const auto Opcode = MI.getOpcode(); Opcode) {

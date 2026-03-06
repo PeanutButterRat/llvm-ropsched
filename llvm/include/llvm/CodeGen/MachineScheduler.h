@@ -89,6 +89,7 @@
 #include "llvm/CodeGen/ScheduleDAGInstrs.h"
 #include "llvm/CodeGen/ScheduleDAGMutation.h"
 #include "llvm/CodeGen/TargetSchedule.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"  // Added so all the RopSchedStrategy's could be declared in the header.
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -141,7 +142,6 @@ class MachineLoopInfo;
 class RegisterClassInfo;
 class SchedDFSResult;
 class ScheduleHazardRecognizer;
-class TargetInstrInfo;
 class TargetPassConfig;
 class TargetRegisterInfo;
 
@@ -1438,10 +1438,23 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
-// RopSchedStrategy - Return-oriented programming defensive scheduler.
+// ExtendedScoreRopSchedStrategy - A score-based return-oriented programming 
+// defensive scheduler.
+// 
+// This scheduler attempts to arrange instructions based on their gadget score.
+// The scoring criteria is based on how difficult a particular instruction makes
+// a gadget to use in a ROP chain if it were to appear in the gadget.
+// 
+// A lot of the scoring criteria is based gadget destination register which is
+// hard to predict during scheduling. This is the most probable reason as to why
+// this scheduler struggles to produce good results. The main idea was to have
+// this one act as a "general" target-agnostic scheduler that uses the
+// helper functions from MachineInstr to determine instruction category, and
+// have the target-specific scheduler be implemented in the target backend 
+// where you could check the opcodes directly.
 //===----------------------------------------------------------------------===//
 
-class LLVM_ABI RopSchedStrategy : public MachineSchedStrategy {
+class LLVM_ABI ExtendedScoreRopSchedStrategy : public MachineSchedStrategy {
   using RopInstruction = std::pair<float, SUnit *>;
 
   struct Compare {
@@ -1458,49 +1471,186 @@ protected:
   ScheduleDAGMI *DAG = nullptr;
 
 public:
-  explicit RopSchedStrategy(const MachineSchedContext *C) {
-    Capstone CS{CS_ARCH_X86, CS_MODE_64};
+  explicit ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) { }
+
+  void initialize(ScheduleDAGMI *DAG) override {
+    this->DAG = DAG;
+    ReadyQ.clear();
   }
 
-  void initialize(ScheduleDAGMI *DAG) override;
+  void enterMBB(MachineBasicBlock *MBB) override {
+    std::map<unsigned, unsigned> Frequency;
 
-  void enterMBB(MachineBasicBlock *MBB) override;
+    for (const MachineInstr &MI : *MBB) {
+      for (unsigned Def = 0; Def < MI.getNumExplicitDefs(); Def++) {
+        const MachineOperand &Operand = MI.getOperand(Def);
+        const Register &Reg = Operand.getReg();
+        Frequency[Reg.id()]++;
+      }
+    }
 
-  SUnit *pickNode(bool &IsTopNode) override;
+    GadgetRegister = std::nullopt;
+    unsigned MaxFreqency = 0;
+
+    for (const auto &Entry : Frequency) {
+      if (Entry.second > MaxFreqency) {
+        GadgetRegister = Entry.first;
+        MaxFreqency = Entry.second;
+      }
+    }
+  };
+
+  SUnit *pickNode(bool &IsTopNode) override {
+    while (!ReadyQ.empty()) {
+      RopInstruction Instruction = ReadyQ.top();
+      ReadyQ.pop();
+
+      SUnit *Next = Instruction.second;
+
+      if (!Next->isScheduled) {
+        IsTopNode = true;
+        return Next;
+      }
+    }
+
+    return nullptr;
+  }
 
   void schedNode(SUnit *SU, bool IsTopNode) override {}
 
-  void releaseTopNode(SUnit *SU) override;
+  void releaseTopNode(SUnit *SU) override {
+    MachineInstr *MI = SU->getInstr();
+    float Score = scoreInstruction(*MI);
+    ReadyQ.emplace(Score, SU);
+  }
 
   void releaseBottomNode(SUnit *SU) override {}
 
-  float scoreInstruction(const MachineInstr &MI);
+  float scoreInstruction(const MachineInstr &MI) {
+    float Score = 0.0f;
 
-  std::optional<Register> getDestinationRegister(const MachineInstr &MI);
+    // Conditional operation checks.
+    if (isConditionalJump(MI)) {
+      Score += 3.0f;
+    } else if (isConditionalDataMove(MI)) {
+      Score += 2.0f;
+    } else if (isConditionalSet(MI)) {
+      Score += 1.0f;
+    }
 
-  virtual bool isConditionalJump(const MachineInstr &MI);
+    // Register operation checks.
+    std::optional<Register> DestinationRegister = getDestinationRegister(MI);
+    bool InstructionModifiesGadgetRegister = (DestinationRegister.has_value()) ? (DestinationRegister.value().id() == GadgetRegister) : false;
+    if (isShiftOrRotate(MI)) {
+      Score += (InstructionModifiesGadgetRegister) ? 1.5f : 1.0f;
+    } else if (modifiesDataRegister(MI)) {
+      Score += (InstructionModifiesGadgetRegister) ? 1.0f : 0.5f;
+    }
 
-  virtual bool isDataMove(const MachineInstr &MI);
+    // Memory write check.
+    if (writesToMemory(MI)) {
+      Score += 1.0f;
+    }
 
-  virtual bool isDataLoad(const MachineInstr &MI);
-  
-  virtual bool isConditionalDataMove(const MachineInstr &MI);
+    // Category-specific checks.
+    if (SUnit *ExitSU = &DAG->ExitSU; ExitSU->isInstr()) {
+      const MachineInstr &GPI = *ExitSU->getInstr();
 
-  virtual bool isConditionalSet(const MachineInstr &MI);
+      if (GPI.isReturn() && modifiesStackPointer(MI)) {  // ROP.
+        if (isDataMove(MI) || isDataLoad(MI)) {
+          Score += 4.0f;
+        } else if (isShiftOrRotate(MI)) {
+          Score += 3.0f;
+        } else {
+          Score += 2.0f;
+        }
+      } else if ((GPI.isCall() || GPI.isBranch()) && modifiesBranchTarget(MI)) {  // JOP/COP.
+        if (isShiftOrRotate(MI)) {
+          Score += 3.0f;
+        } else {
+          Score += 2.0f;
+        }
+      }
+    }
 
-  virtual bool isShiftOrRotate(const MachineInstr &MI);
+    return Score;
+  }
 
-  virtual bool modifiesDataRegister(const MachineInstr &MI);
+  std::optional<Register> getDestinationRegister(const MachineInstr &MI) {
+    if (MI.getNumExplicitDefs() > 0) {
+      const MachineOperand &Operand = MI.getOperand(0);
 
-  virtual bool writesToMemory(const MachineInstr &MI);
+      if (Operand.isReg()) {
+        return Operand.getReg();
+      }
+    }
 
-  virtual bool modifiesStackPointer(const MachineInstr &MI);
+    return std::nullopt;
+  }
 
-  virtual bool modifiesBranchTarget(const MachineInstr &MI);
+  virtual bool isConditionalJump(const MachineInstr &MI) {
+    const MCInstrDesc &Desc = MI.getDesc();
+    return Desc.isConditionalBranch();
+  }
+
+  virtual bool isDataMove(const MachineInstr &MI) {
+    const MCInstrDesc &Desc = MI.getDesc();
+    return Desc.isMoveImmediate() || Desc.isMoveReg();
+  }
+
+  virtual bool isDataLoad(const MachineInstr &MI) {
+    const MCInstrDesc &Desc = MI.getDesc();
+    return Desc.mayLoad();
+  }
+
+  virtual bool isConditionalDataMove(const MachineInstr &MI) {
+    const MCInstrDesc &Desc = MI.getDesc();
+    return isDataMove(MI) && Desc.isPredicable();
+  }
+
+  virtual bool isConditionalSet(const MachineInstr &MI) {
+    const MCInstrDesc &Desc = MI.getDesc();
+    return Desc.isPredicable() && MI.getNumExplicitDefs() > 0;
+  }
+
+  virtual bool isShiftOrRotate(const MachineInstr &MI) {
+    return false;
+  }
+
+  virtual bool modifiesDataRegister(const MachineInstr &MI) {
+    return MI.getNumExplicitDefs() > 0;
+  }
+
+  virtual bool writesToMemory(const MachineInstr &MI) {
+    const MCInstrDesc &Desc = MI.getDesc();
+    return Desc.mayStore();
+  }
+
+  virtual bool modifiesStackPointer(const MachineInstr &MI) {
+    std::optional<Register> DestinationRegister = getDestinationRegister(MI);
+
+    if (DestinationRegister.has_value() && Register::isPhysicalRegister(DestinationRegister.value())) {
+      StringRef RegisterName = DAG->TRI->getName(DestinationRegister.value());
+      return RegisterName.contains("SP");
+    }
+
+    return false;
+  }
+
+  virtual bool modifiesBranchTarget(const MachineInstr &MI) {
+    std::optional<Register> DestinationRegister = getDestinationRegister(MI);
+    return DestinationRegister.has_value() && (DestinationRegister.value().id() == GadgetRegister);
+  }
 };
 
 //===----------------------------------------------------------------------===//
-// RopInstruction - Helper class for RopSchedStrategy.
+// ScoreRopSchedStrategy - A score-based return-oriented programming defensive 
+// scheduler.
+// 
+// This is similar to the first scheduler, but is instead based on the original
+// scoring criteria from Follner et. (https://arxiv.org/abs/1605.08159) instead
+// of the extended criteria used in GadgetSetAnalyzer. Neither of them seem to
+// perform very well, however, so it looks like it doesn't matter in the end.
 //===----------------------------------------------------------------------===//
 
 enum InstrCategory {
@@ -1516,55 +1666,163 @@ enum InstrDestReg {
   Other,
 };
 
+// The scoring table. This is indexed by the InstrCategory and InstrDestReg enums.
+constexpr std::array<std::array<float, 3>, 4> InstructionScoringTable {{
+  { 2.0f, 1.0f, 0.5f },
+  { 2.0f, 1.0f, 0.5f },
+  { 3.0f, 2.0f, 0.5f },
+  { 0.0f, 0.0f, 0.5f },
+}};
+
+// Instead of checking instructions by opcode, I use the prefix for the instruction.
+// This is becaue the headers where they are defined are located in the target-specific
+// backend, so they have linkage issues when trying to pull them into a this header file.
+const std::array<std::pair<InstrCategory, std::vector<StringLiteral>>, 3> InstructionPrefixes {{
+  {DataMove, { "SXTW", "SXTH", "MOV", "UXTW", "SXTB", "UXTB", "MOVZ", "UXTH" }},
+  {Arithmetic, { "UMULL", "MADD", "SBC", "SMULL", "NEGS", "NGC", "MSUB", "SMSUBL", "SMNEGL", "MNEG", "SDIV", "ADRP", "SUB", "SUBS", "ADR", "ADDS", "SBCS", "UMULH", "ADD", "NGCS", "SMADDL", "UMADDL", "ADC", "NEG", "UMSUBL", "MUL", "SMULH", "ADCS", "UDIV", "UMNEGL" }},
+  {ShiftAndRotate, { "LSL", "LSR", "ASR", "ROR" }},
+}};
+
+// Used to store the score information about an instruction.
 struct RopInstruction {
   SUnit *SU;
   ScheduleDAGMI *DAG;
-
   StringRef Name;
   std::optional<unsigned> AssumedGadgetRegister = std::nullopt;
   InstrCategory Category;
   InstrDestReg DestReg;
-  std::vector<std::string> Destinations;
   float Score;
 
-  RopInstruction(SUnit *SU, ScheduleDAGMI *DAG, std::optional<unsigned> AssumedGadgetRegister = std::nullopt);
+  RopInstruction(SUnit *SU, ScheduleDAGMI *DAG, std::optional<unsigned> AssumedGadgetRegister = std::nullopt) {
+    assert(SU && "SUnit is null");
+    assert(DAG && "ScheduleDAGMI is null");
 
-  bool operator<(const RopInstruction& Other) const;
+    this->SU = SU;
+    this->DAG = DAG;
+    this->AssumedGadgetRegister = AssumedGadgetRegister;
 
-  float calculateScore();
+    const MachineInstr *MI = SU->getInstr();
+    const unsigned Opcode = MI->getOpcode();
+    Name = DAG->TII->getName(Opcode);
+    Score = calculateScore();
+  }
 
-  InstrCategory getInstrCategory() const;
+  bool operator<(const RopInstruction& Other) const {
+    return Score < Other.Score;
+  }
 
-  InstrDestReg getInstrDestReg();
+  float calculateScore() {
+    Category = getInstrCategory();
+    DestReg = getInstrDestReg();
+    return InstructionScoringTable[Category][DestReg];
+  }
+
+  // Finds the category based on the instruction prefix.
+  InstrCategory getInstrCategory() const {
+    for (const auto& [Category, Prefixes] : InstructionPrefixes) {
+      for (const auto& Prefix : Prefixes) {
+        if (Name.starts_with(Prefix)) {
+          return Category;
+        }
+      }
+    }
+
+    return Misc;
+  }
+
+  InstrDestReg getInstrDestReg() {
+    const MachineInstr *MI = SU->getInstr();
+    const MCInstrDesc &Desc = MI->getDesc();
+    InstrDestReg Destination = Other;
+
+    for (size_t i = 0; i < Desc.getNumOperands(); i++) {
+      const MachineOperand Operand = MI->getOperand(i);
+
+      if (Operand.isReg()) {
+        const Register Reg = Operand.getReg();
+
+        if (AssumedGadgetRegister.has_value() && Reg.id() == AssumedGadgetRegister.value() && Destination == Other) {
+          Destination = GadgetRegister;
+        }
+        else if (Register::isPhysicalRegister(Reg)) {
+          const StringRef Name { DAG->TRI->getName(Reg) };
+
+          if (Name.equals_insensitive("RSP")) {
+            Destination = StackPointer;
+          }
+        }
+      }
+    }
+
+    return Destination;
+  }
 };
 
-//===----------------------------------------------------------------------===//
-// RopSchedStrategy - Return-oriented programming defensive scheduler.
-//===----------------------------------------------------------------------===//
-
-class LLVM_ABI OldRopSchedStrategy : public MachineSchedStrategy {
-  std::optional<unsigned> AssumedGadgetRegister = std::nullopt;
-  ScheduleDAGMI *DAG = nullptr;
-  std::vector<RopInstruction> ReadyQ{};
+class LLVM_ABI ScoreRopSchedStrategy : public MachineSchedStrategy {
+  std::optional<unsigned> GadgetRegister;
+  ScheduleDAGMI *DAG;
+  std::vector<RopInstruction> ReadyQ;
 
 public:
-  explicit OldRopSchedStrategy(const MachineSchedContext *C);
+  explicit ScoreRopSchedStrategy(const MachineSchedContext *C)
+    : GadgetRegister(std::nullopt), DAG(nullptr), ReadyQ() { }
 
-  void initialize(ScheduleDAGMI *DAG) override;
+  void initialize(ScheduleDAGMI *DAG) override {
+    this->DAG = DAG;
+    ReadyQ.clear();
+    GadgetRegister = std::nullopt;
+  }
 
-  SUnit *pickNode(bool &IsTopNode) override;
+  void enterMBB(MachineBasicBlock *MBB) override {
+    std::map<unsigned, unsigned> Frequency;
 
-  SUnit *pickTopNode(bool &IsTopNode);
+    for (const MachineInstr &MI : *MBB) {
+      for (unsigned Def = 0; Def < MI.getNumExplicitDefs(); Def++) {
+        const MachineOperand &Operand = MI.getOperand(Def);
+        const Register &Reg = Operand.getReg();
+        Frequency[Reg.id()]++;
+      }
+    }
 
-  SUnit *pickBottomNode(bool &IsTopNode);
+    GadgetRegister = std::nullopt;
+    unsigned MaxFreqency = 0;
 
-  void schedNode(SUnit *SU, bool IsTopNode) override;
+    for (const auto &Entry : Frequency) {
+      if (Entry.second > MaxFreqency) {
+        GadgetRegister = Entry.first;
+        MaxFreqency = Entry.second;
+      }
+    }
+  }
 
-  void releaseTopNode(SUnit *SU) override;
+  void releaseTopNode(SUnit *SU) override {
+    RopInstruction Instruction{SU, DAG, GadgetRegister};
+    auto it = std::lower_bound(ReadyQ.begin(), ReadyQ.end(), Instruction);
+    ReadyQ.insert(it, Instruction);
+  }
 
-  void releaseBottomNode(SUnit *SU) override;
+  SUnit *pickNode(bool &IsTopNode) override {
+    SUnit *Next = nullptr;
 
-  void printReadyQueue() const;
+    // For whatever reason, the scheduling looks like it does a little better
+    // when taking from the back of the queue instead of the front (at least),
+    // for pre-RA scheduling which is counterintuitive. This leads me to believe
+    // that this scheduler isn't doing anything productive and the results are random.
+    while (!ReadyQ.empty() && !Next) {
+      Next = ReadyQ.front().SU;
+      ReadyQ.erase(ReadyQ.begin());
+    }
+
+    if (Next) {
+      IsTopNode = true;
+    }
+
+    return Next;
+  }
+
+  void schedNode(SUnit *SU, bool IsTopNode) override { }
+
+  void releaseBottomNode(SUnit *SU) override { };
 };
 
 

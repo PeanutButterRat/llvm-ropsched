@@ -487,10 +487,11 @@ AArch64TargetMachine::getSubtargetImpl(const Function &F) const {
   return I.get();
 }
 
-#define DEBUG_TYPE "ropsched"
-
-struct AArch64PostRARopSchedStrategy : public RopSchedStrategy {
-  explicit AArch64PostRARopSchedStrategy(const MachineSchedContext *C) : RopSchedStrategy(C) {};
+// Here is an example of a class that would extend ExtendedScoreRopSchedStrategy.
+// Theoretically, it should perform better because the opcode is compared directly, but 
+// that doesn't seem to be the case.
+struct AArch64PostRARopSchedStrategy : public ExtendedScoreRopSchedStrategy {
+  explicit AArch64PostRARopSchedStrategy(const MachineSchedContext *C) : ExtendedScoreRopSchedStrategy(C) {};
 
   bool isConditionalDataMove(const MachineInstr &MI) override {
     switch (const auto Opcode = MI.getOpcode(); Opcode) {
@@ -578,7 +579,7 @@ AArch64TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 ScheduleDAGInstrs *
 AArch64TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
   const AArch64Subtarget &ST = C->MF->getSubtarget<AArch64Subtarget>();
-  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<TrieRopSchedStrategy>(C) : createSchedPostRA<AArch64PostRASchedStrategy>(C);
+  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<AArch64PostRARopSchedStrategy>(C) : createSchedPostRA<AArch64PostRASchedStrategy>(C);
   if (ST.hasFusion()) {
     // Run the Macro Fusion after RA again since literals are expanded from
     // pseudos then (v. addPreSched2()).
