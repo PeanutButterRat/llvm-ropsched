@@ -788,7 +788,10 @@ MachineModuleInfoMachO &X86MCInstLowerCopy::getMachOMMI() const {
   return AsmPrinter.MMI->getObjFileInfo<MachineModuleInfoMachO>();
 }
 
-class CapstoneRopSchedStrategy : public MachineSchedStrategy {
+
+#define DEBUG_TYPE "ropsched"
+
+class X86CapstoneRopSchedStrategy : public MachineSchedStrategy {
   std::vector<SUnit *> Ready;
   ScheduleDAGMI *DAG;
   MCSubtargetInfo *MSTI;
@@ -806,10 +809,10 @@ class CapstoneRopSchedStrategy : public MachineSchedStrategy {
   size_t LastCallInstr;
 
 public:
-  explicit CapstoneRopSchedStrategy(const MachineSchedContext *C) 
+  explicit X86CapstoneRopSchedStrategy(const MachineSchedContext *C) 
     : Ready(), DAG(nullptr), MSTI(nullptr), Emitter(nullptr), Lowerer(nullptr), InstructionEncodings(),
       CS(CS_ARCH_X86, CS_MODE_64), LastReturnInstr(0), LastJumpInstr(0), LastCallInstr(0) {
-          LLVM_DEBUG(dbgs() << "[CapstoneRopSchedStrategy] Instantiated\n");
+          LLVM_DEBUG(dbgs() << "[X86CapstoneRopSchedStrategy] Instantiated.\n");
       }
 
   void initialize(ScheduleDAGMI *DAG) override {
@@ -978,6 +981,9 @@ public:
         ArrayRef<uint8_t> Window{Schedule.data() + Start, Depth};
         auto Disassembled = CS.disassemble(Window);
 
+        // It also might be worth checking if the disassembled bytes are the same length as the window
+        // size (if it isn't, technically it wouldn't be a gadget). This is what RopGadget does, but this
+        // results in worse performance overall.
         if (!Disassembled.empty()) {
             GadgetCount++;
         }
@@ -995,10 +1001,12 @@ public:
   }
 };
 
-#undef DEBUG_TYPE
-
-struct X86PostRARopSchedStrategy : public ExtendedScoreRopSchedStrategy {
-  explicit X86PostRARopSchedStrategy(const MachineSchedContext *C) : ExtendedScoreRopSchedStrategy(C) {};
+// This is another example of the ExtendedScoreRopSchedStrategy which also doesn't perform that
+// well. Theoretically, AArch64 should perform better because it doesn't suffer from misaligned gadgets.
+struct X86ExtendedScoreRopSchedStrategy : public ExtendedScoreRopSchedStrategy {
+  explicit X86ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) : ExtendedScoreRopSchedStrategy(C) {
+    LLVM_DEBUG(dbgs() << "[X86ExtendedScoreRopSchedStrategy] Instantiated.");
+  };
 
   bool isConditionalDataMove(const MachineInstr &MI) override {
     switch (const auto Opcode = MI.getOpcode(); Opcode) {
@@ -1071,10 +1079,13 @@ X86TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 
 ScheduleDAGInstrs *
 X86TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
-  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<CapstoneRopSchedStrategy>(C) : createSchedPostRA(C);
+  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<X86CapstoneRopSchedStrategy>(C) : createSchedPostRA(C);
   DAG->addMutation(createX86MacroFusionDAGMutation());
   return DAG;
 }
+
+#undef DEBUG_TYPE
+
 
 //===----------------------------------------------------------------------===//
 // X86 TTI query.

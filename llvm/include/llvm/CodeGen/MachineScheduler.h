@@ -1388,10 +1388,27 @@ protected:
   void pickNodeFromQueue(SchedBoundary &Zone, SchedCandidate &Cand);
 };
 
+
+#undef DEBUG_TYPE
+#define DEBUG_TYPE "ropsched"
+
 //===----------------------------------------------------------------------===//
-// RopSchedStrategy - Return-oriented programming defensive scheduler.
+// CapstoneRopSchedStrategy - Capstone-based return-oriented programming 
+// defensive scheduler.
+// 
+// This scheduler performs the best out of all the other ones and its easy
+// to see why. During scheduling, it tracks the last valid encoding of JMP,
+// CALL, and RET instructions and uses the Capstone disassembler to disassemble
+// sequences of bytes starting from those offsets. Whichever instruction results
+// in the lowest number of gadgets is scheduled next. This more closely follows
+// the logic behind RopGadget and the produces positive results (on average)
+// across gadget count and quality.
+// 
+// These are some helper classes that are used in the acutal scheduling
+// strategy. See "X86TargetMachine.cpp" for the actual class.
 //===----------------------------------------------------------------------===//
 
+// Wrapper for cs_insn from "capstone.h".
 struct CsInstr {
   unsigned int id;
   std::string mnemonic;
@@ -1414,6 +1431,8 @@ public:
     }
   }
 
+  // Disassembles a seqeunce of bytes and returns a vector of CsInstr if the sequence
+  // is valid assembly.
   std::vector<CsInstr> disassemble(const std::vector<uint8_t> &Bytes) const {
     std::vector<CsInstr> Disassembled{};
 
@@ -1471,7 +1490,9 @@ protected:
   ScheduleDAGMI *DAG = nullptr;
 
 public:
-  explicit ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) { }
+  explicit ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) {
+    LLVM_DEBUG(dbgs() << "[ExtendedScoreRopSchedStrategy] Instantiated.");
+  }
 
   void initialize(ScheduleDAGMI *DAG) override {
     this->DAG = DAG;
@@ -1765,7 +1786,9 @@ class LLVM_ABI ScoreRopSchedStrategy : public MachineSchedStrategy {
 
 public:
   explicit ScoreRopSchedStrategy(const MachineSchedContext *C)
-    : GadgetRegister(std::nullopt), DAG(nullptr), ReadyQ() { }
+    : GadgetRegister(std::nullopt), DAG(nullptr), ReadyQ() {
+      LLVM_DEBUG(dbgs() << "[ScoreRopSchedStrategy] Instantiated.");
+    }
 
   void initialize(ScheduleDAGMI *DAG) override {
     this->DAG = DAG;
@@ -1908,6 +1931,7 @@ class TrieRopSchedStrategy : public MachineSchedStrategy {
 public:
   explicit TrieRopSchedStrategy(const MachineSchedContext *C)
     : ReadyQ(), LastInstructionScheduled(&BasicBlockSuffixes) {
+      LLVM_DEBUG(dbgs() << "[TrieRopSchedStrategy] Instantiated.");
   }
 
   void enterMBB(MachineBasicBlock *MBB) override {
@@ -1953,6 +1977,9 @@ public:
 
   void releaseTopNode(SUnit *SU) override { }
 };
+
+#undef DEBUG_TYPE
+
 
 /// If ReorderWhileClustering is set to true, no attempt will be made to
 /// reduce reordering due to store clustering.
