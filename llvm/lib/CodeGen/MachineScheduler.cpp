@@ -207,12 +207,6 @@ static cl::opt<bool>
     DumpCriticalPathLength("misched-dcpl", cl::Hidden,
                            cl::desc("Print critical path length to stdout"));
 
-// This flag is for selecting whether or not to use RopSched as the post-RA machine scheduler to make
-// it easier to benchmark the different combinations of schedulers.
-cl::opt<bool> EnableRopSchedPostRA(
-    "enable-ropsched-postra", cl::Hidden,
-    cl::desc("Toggles which post-RA machine scheduler should be used (default or RopSched)"));
-
 cl::opt<bool> VerifyScheduling(
     "verify-misched", cl::Hidden,
     cl::desc("Verify machine instrs before and after machine scheduling"));
@@ -4606,29 +4600,6 @@ void PostGenericScheduler::schedNode(SUnit *SU, bool IsTopNode) {
     Bot.bumpNode(SU);
   }
 }
-
-// Register the pre-RA scheduling strategies with LLVM. I have moved the actual implementations
-// to MachineScheduler.h just because its a little bit easier to manage instead of swapping
-// between the header and implementation files.
-static ScheduleDAGInstrs *createScoreRopMachineScheduler(MachineSchedContext *C) {
-  return new ScheduleDAGMILive(C, std::make_unique<ScoreRopSchedStrategy>(C));
-}
-
-static MachineSchedRegistry RopSchedRegistry(
-  "score-ropsched", "Score-based return-oriented programming defensive scheduler.",
-  createScoreRopMachineScheduler);
-
-
-static ScheduleDAGInstrs *createTrieRopMachineScheduler(MachineSchedContext *C) {
-  return new ScheduleDAGMILive(C, std::make_unique<ScoreRopSchedStrategy>(C));
-}
-
-static MachineSchedRegistry TrieRopSchedRegistry(
-  "trie-ropsched", "Trie-based return-oriented programming defensive scheduler.",
-  createTrieRopMachineScheduler);
-
-#undef DEBUG_TYPE
-#define DEBUG_TYPE "machine-scheduler"
 
 //===----------------------------------------------------------------------===//
 // ILP Scheduler. Currently for experimental analysis of heuristics.

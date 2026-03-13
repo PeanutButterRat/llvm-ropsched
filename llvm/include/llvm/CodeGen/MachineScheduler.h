@@ -124,7 +124,6 @@ enum Direction {
 
 LLVM_ABI extern cl::opt<MISched::Direction> PreRADirection;
 LLVM_ABI extern cl::opt<bool> VerifyScheduling;
-LLVM_ABI extern cl::opt<bool> EnableRopSchedPostRA;
 #ifndef NDEBUG
 extern cl::opt<bool> ViewMISchedDAGs;
 extern cl::opt<bool> PrintDAGs;
@@ -1665,13 +1664,17 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
-// ScoreRopSchedStrategy - A score-based return-oriented programming defensive 
-// scheduler.
+// AArch64ScoreRopSchedStrategy - A score-based return-oriented programming 
+// defensive scheduler.
 // 
 // This is similar to the first scheduler, but is instead based on the original
 // scoring criteria from Follner et. (https://arxiv.org/abs/1605.08159) instead
 // of the extended criteria used in GadgetSetAnalyzer. Neither of them seem to
 // perform very well, however, so it looks like it doesn't matter in the end.
+// 
+// The instructions nmemonics are for AArch64, so they should probably be in
+// AArch64TargetMachine.cpp, but it's not worth the effort of moving it to
+// a different file since this is for research purposes anyways.
 //===----------------------------------------------------------------------===//
 
 enum InstrCategory {
@@ -1779,13 +1782,13 @@ struct RopInstruction {
   }
 };
 
-class LLVM_ABI ScoreRopSchedStrategy : public MachineSchedStrategy {
+class LLVM_ABI AArch64ScoreRopSchedStrategy : public MachineSchedStrategy {
   std::optional<unsigned> GadgetRegister;
   ScheduleDAGMI *DAG;
   std::vector<RopInstruction> ReadyQ;
 
 public:
-  explicit ScoreRopSchedStrategy(const MachineSchedContext *C)
+  explicit AArch64ScoreRopSchedStrategy(const MachineSchedContext *C)
     : GadgetRegister(std::nullopt), DAG(nullptr), ReadyQ() {
       LLVM_DEBUG(dbgs() << "[ScoreRopSchedStrategy] Instantiated.");
     }

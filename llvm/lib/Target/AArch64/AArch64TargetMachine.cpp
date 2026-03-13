@@ -58,6 +58,44 @@
 
 using namespace llvm;
 
+// Extra command line options to make it easier to benchmark each scheduling strategy.
+namespace RopSched {
+enum Scheduler {
+  Default,
+  Trie,
+  Score,
+  ExtendedScore,
+};
+}
+
+static cl::opt<RopSched::Scheduler> AArch64PreRARopSchedScheduler(
+    "aarch64-prera-ropsched-strategy", cl::Hidden,
+    cl::desc("Pre-RA RopSched scheduling strategy to use for AArch64"),
+    cl::init(RopSched::Scheduler::Default),
+    cl::values(
+        clEnumValN(RopSched::Scheduler::Default, "default",
+                   "Default AArch64 strategy (AArch64PostRASchedStrategy)"),
+        clEnumValN(RopSched::Scheduler::Score, "score",
+                   "ScoreRopSchedStrategy"),
+        clEnumValN(RopSched::Scheduler::ExtendedScore, "extended-score",
+                   "AArch64ExtendedScoreRopSchedStrategy"),
+        clEnumValN(RopSched::Scheduler::Trie, "trie",
+                   "TrieRopSchedStrategy")));
+
+static cl::opt<RopSched::Scheduler> AArch64PostRARopSchedScheduler(
+    "aarch64-postra-ropsched-strategy", cl::Hidden,
+    cl::desc("Post-RA RopSched scheduling strategy to use for AArch64"),
+    cl::init(RopSched::Scheduler::Default),
+    cl::values(
+        clEnumValN(RopSched::Scheduler::Default, "default",
+                   "Default AArch64 strategy (GenericScheduler)"),
+        clEnumValN(RopSched::Scheduler::Score, "score",
+                   "ScoreRopSchedStrategy"),
+        clEnumValN(RopSched::Scheduler::ExtendedScore, "extended-score",
+                   "AArch64ExtendedScoreRopSchedStrategy"),
+        clEnumValN(RopSched::Scheduler::Trie, "trie",
+                   "TrieRopSchedStrategy")));
+
 static cl::opt<bool> EnableCCMP("aarch64-enable-ccmp",
                                 cl::desc("Enable the CCMP formation pass"),
                                 cl::init(true), cl::Hidden);
@@ -577,7 +615,23 @@ struct AArch64ExtendedScoreRopSchedStrategy : public ExtendedScoreRopSchedStrate
 ScheduleDAGInstrs *
 AArch64TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
   const AArch64Subtarget &ST = C->MF->getSubtarget<AArch64Subtarget>();
-  ScheduleDAGMILive *DAG = createSchedLive(C);
+  ScheduleDAGMI *DAG = nullptr;
+
+  switch (AArch64PreRARopSchedScheduler) {
+  case RopSched::Scheduler::Trie:
+    DAG = createSchedLive<TrieRopSchedStrategy>(C);
+    break;
+  case RopSched::Scheduler::Score:
+    DAG = createSchedLive<AArch64ScoreRopSchedStrategy>(C);
+    break;
+  case RopSched::Scheduler::ExtendedScore:
+    DAG = createSchedLive<AArch64ExtendedScoreRopSchedStrategy>(C);
+    break;
+  default:
+    DAG = createSchedLive(C);
+    break;
+  }
+
   DAG->addMutation(createLoadClusterDAGMutation(DAG->TII, DAG->TRI));
   DAG->addMutation(createStoreClusterDAGMutation(DAG->TII, DAG->TRI));
   if (ST.hasFusion())
@@ -588,7 +642,23 @@ AArch64TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 ScheduleDAGInstrs *
 AArch64TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
   const AArch64Subtarget &ST = C->MF->getSubtarget<AArch64Subtarget>();
-  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<AArch64ExtendedScoreRopSchedStrategy>(C) : createSchedPostRA<AArch64PostRASchedStrategy>(C);
+  ScheduleDAGMI *DAG = nullptr;
+
+  switch (AArch64PostRARopSchedScheduler) {
+  case RopSched::Scheduler::Trie:
+    DAG = createSchedPostRA<TrieRopSchedStrategy>(C);
+    break;
+  case RopSched::Scheduler::Score:
+    DAG = createSchedPostRA<AArch64ScoreRopSchedStrategy>(C);
+    break;
+  case RopSched::Scheduler::ExtendedScore:
+    DAG = createSchedPostRA<AArch64ExtendedScoreRopSchedStrategy>(C);
+    break;
+  default:
+    DAG = createSchedPostRA<AArch64PostRASchedStrategy>(C);
+    break;
+  }
+
   if (ST.hasFusion()) {
     // Run the Macro Fusion after RA again since literals are expanded from
     // pseudos then (v. addPreSched2()).

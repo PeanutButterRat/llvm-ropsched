@@ -64,6 +64,12 @@
 
 using namespace llvm;
 
+// This flag is for selecting whether or not to use the CapstoneRopSchedStrategy during
+// scheduling or the generic post-RA scheduler.
+cl::opt<bool> EnableX86CapstoneRopSchedStrategy(
+    "enable-x86-capstone-ropsched", cl::Hidden, cl::init(false),
+    cl::desc("Toggles which post-RA machine scheduler should be used for x86 (PostGenericScheduler or X86CapstoneRopSchedStrategy)"));
+
 static cl::opt<bool> EnableMachineCombinerPass("x86-machine-combiner",
                                cl::desc("Enable the machine combiner pass"),
                                cl::init(true), cl::Hidden);
@@ -1079,7 +1085,7 @@ X86TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 
 ScheduleDAGInstrs *
 X86TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
-  ScheduleDAGMI *DAG = (EnableRopSchedPostRA) ? createSchedPostRA<X86CapstoneRopSchedStrategy>(C) : createSchedPostRA(C);
+  ScheduleDAGMI *DAG = (EnableX86CapstoneRopSchedStrategy) ? createSchedPostRA<X86CapstoneRopSchedStrategy>(C) : createSchedPostRA(C);
   DAG->addMutation(createX86MacroFusionDAGMutation());
   return DAG;
 }
