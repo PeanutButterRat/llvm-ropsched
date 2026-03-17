@@ -533,9 +533,7 @@ AArch64TargetMachine::getSubtargetImpl(const Function &F) const {
 // that doesn't seem to be the case.
 struct AArch64ExtendedScoreRopSchedStrategy : public ExtendedScoreRopSchedStrategy {
   explicit AArch64ExtendedScoreRopSchedStrategy(const MachineSchedContext *C)
-    : ExtendedScoreRopSchedStrategy(C) {
-      LLVM_DEBUG(dbgs() << "[AArch64ExtendedScoreRopSchedStrategy] Instantiated.\n");
-    };
+    : ExtendedScoreRopSchedStrategy(C) { }
 
   bool isConditionalDataMove(const MachineInstr &MI) override {
     switch (const auto Opcode = MI.getOpcode(); Opcode) {

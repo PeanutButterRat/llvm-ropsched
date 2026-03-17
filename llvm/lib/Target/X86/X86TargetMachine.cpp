@@ -817,9 +817,7 @@ class X86CapstoneRopSchedStrategy : public MachineSchedStrategy {
 public:
   explicit X86CapstoneRopSchedStrategy(const MachineSchedContext *C) 
     : Ready(), DAG(nullptr), MSTI(nullptr), Emitter(nullptr), Lowerer(nullptr), InstructionEncodings(),
-      CS(CS_ARCH_X86, CS_MODE_64), LastReturnInstr(0), LastJumpInstr(0), LastCallInstr(0) {
-          LLVM_DEBUG(dbgs() << "[X86CapstoneRopSchedStrategy] Instantiated.\n");
-      }
+      CS(CS_ARCH_X86, CS_MODE_64), LastReturnInstr(0), LastJumpInstr(0), LastCallInstr(0) { }
 
   void initialize(ScheduleDAGMI *DAG) override {
     this->DAG = DAG;
@@ -1010,9 +1008,7 @@ public:
 // This is another example of the ExtendedScoreRopSchedStrategy which also doesn't perform that
 // well. Theoretically, AArch64 should perform better because it doesn't suffer from misaligned gadgets.
 struct X86ExtendedScoreRopSchedStrategy : public ExtendedScoreRopSchedStrategy {
-  explicit X86ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) : ExtendedScoreRopSchedStrategy(C) {
-    LLVM_DEBUG(dbgs() << "[X86ExtendedScoreRopSchedStrategy] Instantiated.");
-  };
+  explicit X86ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) : ExtendedScoreRopSchedStrategy(C) { }
 
   bool isConditionalDataMove(const MachineInstr &MI) override {
     switch (const auto Opcode = MI.getOpcode(); Opcode) {

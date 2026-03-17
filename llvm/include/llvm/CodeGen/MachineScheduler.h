@@ -1489,9 +1489,7 @@ protected:
   ScheduleDAGMI *DAG = nullptr;
 
 public:
-  explicit ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) {
-    LLVM_DEBUG(dbgs() << "[ExtendedScoreRopSchedStrategy] Instantiated.");
-  }
+  explicit ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) { }
 
   void initialize(ScheduleDAGMI *DAG) override {
     this->DAG = DAG;
@@ -1789,9 +1787,7 @@ class LLVM_ABI AArch64ScoreRopSchedStrategy : public MachineSchedStrategy {
 
 public:
   explicit AArch64ScoreRopSchedStrategy(const MachineSchedContext *C)
-    : GadgetRegister(std::nullopt), DAG(nullptr), ReadyQ() {
-      LLVM_DEBUG(dbgs() << "[ScoreRopSchedStrategy] Instantiated.");
-    }
+    : GadgetRegister(std::nullopt), DAG(nullptr), ReadyQ() { }
 
   void initialize(ScheduleDAGMI *DAG) override {
     this->DAG = DAG;
@@ -1872,16 +1868,22 @@ public:
 // the equality operator, we are left to compare two instructions as best we can.
 struct MachineInstrComparisonData {
   uint16_t Opcode;
-  uint32_t NumberOfOperands;
+  std::vector<unsigned> Operands;
 
-  MachineInstrComparisonData(const MachineInstr *MI) : Opcode(MI->getOpcode()), NumberOfOperands(MI->getNumOperands()) {}
-  MachineInstrComparisonData() : Opcode(0), NumberOfOperands(0) {}
+  MachineInstrComparisonData(const MachineInstr *MI) : Opcode(MI->getOpcode()), Operands() {
+    for (const MachineOperand &MO : MI->operands()) {
+      if (MO.isReg()) {
+        Operands.push_back(MO.getReg().id());
+      }
+    }
+  }
 
-  // The equality operator is quite wide and probably matches with a lot of
-  // non-equivalent instructions, but I'm not sure tightening it up will improve the
-  // results anyways...
+  MachineInstrComparisonData() : Opcode(0), Operands() {}
+
+  // The equality operator is not implemented for MachineInstr so I compare
+  // the opcodes and registers to check if they are equal.
   bool operator==(const MachineInstrComparisonData &Other) const {
-    return Opcode == Other.Opcode && NumberOfOperands == Other.NumberOfOperands;
+    return Opcode == Other.Opcode && Operands == Other.Operands;
   }
 };
 
@@ -1930,18 +1932,18 @@ static MachineInstrTrieNode BasicBlockSuffixes;
 class TrieRopSchedStrategy : public MachineSchedStrategy {
   std::vector<SUnit *> ReadyQ;
   MachineInstrTrieNode *LastInstructionScheduled;
+  ScheduleDAGMI *DAG;
 
 public:
   explicit TrieRopSchedStrategy(const MachineSchedContext *C)
-    : ReadyQ(), LastInstructionScheduled(&BasicBlockSuffixes) {
-      LLVM_DEBUG(dbgs() << "[TrieRopSchedStrategy] Instantiated.");
-  }
+    : ReadyQ(), LastInstructionScheduled(&BasicBlockSuffixes), DAG(nullptr) { }
 
   void enterMBB(MachineBasicBlock *MBB) override {
     LastInstructionScheduled = &BasicBlockSuffixes;  // Reset the scheduling sequence for each new BB.
   }
 
   void initialize(ScheduleDAGMI *DAG) override {
+    this->DAG = DAG;
     ReadyQ.clear();
   }
 
@@ -1956,7 +1958,7 @@ public:
     // Nodes are scheduled based on the following priority:
     //   1. If a path exists already, choose that.
     //   2. If multiple paths exist, choose the one that has the most children for the next scheduling choice.
-    //   3. Make a new path and insert a new node.
+    //   3. Otherwise, choose the first instruction and insert it into the trie.
     for (SUnit * SU : ReadyQ) {
       auto NextNode = LastInstructionScheduled->get(SU->getInstr());
       int NumberOfChildren = (NextNode) ? NextNode->Children.size(): -1;  // New paths have a value of -1 to have the lowest priority.
