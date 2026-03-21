@@ -1472,7 +1472,7 @@ public:
 // where you could check the opcodes directly.
 //===----------------------------------------------------------------------===//
 
-class LLVM_ABI ExtendedScoreRopSchedStrategy : public MachineSchedStrategy {
+class LLVM_ABI ScoreRopSchedStrategy : public MachineSchedStrategy {
   using RopInstruction = std::pair<float, SUnit *>;
 
   struct Compare {
@@ -1489,7 +1489,7 @@ protected:
   ScheduleDAGMI *DAG = nullptr;
 
 public:
-  explicit ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) { }
+  explicit ScoreRopSchedStrategy(const MachineSchedContext *C) { }
 
   void initialize(ScheduleDAGMI *DAG) override {
     this->DAG = DAG;
@@ -1662,7 +1662,7 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
-// AArch64ScoreRopSchedStrategy - A score-based return-oriented programming 
+// AArch64OldScoreRopSchedStrategy - A score-based return-oriented programming 
 // defensive scheduler.
 // 
 // This is similar to the first scheduler, but is instead based on the original
@@ -1780,13 +1780,13 @@ struct RopInstruction {
   }
 };
 
-class LLVM_ABI AArch64ScoreRopSchedStrategy : public MachineSchedStrategy {
+class LLVM_ABI AArch64OldScoreRopSchedStrategy : public MachineSchedStrategy {
   std::optional<unsigned> GadgetRegister;
   ScheduleDAGMI *DAG;
   std::vector<RopInstruction> ReadyQ;
 
 public:
-  explicit AArch64ScoreRopSchedStrategy(const MachineSchedContext *C)
+  explicit AArch64OldScoreRopSchedStrategy(const MachineSchedContext *C)
     : GadgetRegister(std::nullopt), DAG(nullptr), ReadyQ() { }
 
   void initialize(ScheduleDAGMI *DAG) override {

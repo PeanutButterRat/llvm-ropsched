@@ -76,9 +76,7 @@ static cl::opt<RopSched::Scheduler> AArch64PreRARopSchedScheduler(
         clEnumValN(RopSched::Scheduler::Default, "default",
                    "Default AArch64 strategy (AArch64PostRASchedStrategy)"),
         clEnumValN(RopSched::Scheduler::Score, "score",
-                   "ScoreRopSchedStrategy"),
-        clEnumValN(RopSched::Scheduler::ExtendedScore, "extended-score",
-                   "AArch64ExtendedScoreRopSchedStrategy"),
+                   "AArch64ScoreRopSchedStrategy"),
         clEnumValN(RopSched::Scheduler::Trie, "trie",
                    "TrieRopSchedStrategy")));
 
@@ -90,9 +88,7 @@ static cl::opt<RopSched::Scheduler> AArch64PostRARopSchedScheduler(
         clEnumValN(RopSched::Scheduler::Default, "default",
                    "Default AArch64 strategy (GenericScheduler)"),
         clEnumValN(RopSched::Scheduler::Score, "score",
-                   "ScoreRopSchedStrategy"),
-        clEnumValN(RopSched::Scheduler::ExtendedScore, "extended-score",
-                   "AArch64ExtendedScoreRopSchedStrategy"),
+                   "AArch64ScoreRopSchedStrategy"),
         clEnumValN(RopSched::Scheduler::Trie, "trie",
                    "TrieRopSchedStrategy")));
 
@@ -528,12 +524,12 @@ AArch64TargetMachine::getSubtargetImpl(const Function &F) const {
 
 #define DEBUG_TYPE "ropsched"
 
-// Here is an example of a class that would extend ExtendedScoreRopSchedStrategy.
+// Here is an example of a class that would extend ScoreRopSchedStrategy.
 // Theoretically, it should perform better because the opcode is compared directly, but 
 // that doesn't seem to be the case.
-struct AArch64ExtendedScoreRopSchedStrategy : public ExtendedScoreRopSchedStrategy {
-  explicit AArch64ExtendedScoreRopSchedStrategy(const MachineSchedContext *C)
-    : ExtendedScoreRopSchedStrategy(C) { }
+struct AArch64ScoreRopSchedStrategy : public ScoreRopSchedStrategy {
+  explicit AArch64ScoreRopSchedStrategy(const MachineSchedContext *C)
+    : ScoreRopSchedStrategy(C) { }
 
   bool isConditionalDataMove(const MachineInstr &MI) override {
     switch (const auto Opcode = MI.getOpcode(); Opcode) {
@@ -622,9 +618,6 @@ AArch64TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
   case RopSched::Scheduler::Score:
     DAG = createSchedLive<AArch64ScoreRopSchedStrategy>(C);
     break;
-  case RopSched::Scheduler::ExtendedScore:
-    DAG = createSchedLive<AArch64ExtendedScoreRopSchedStrategy>(C);
-    break;
   default:
     DAG = createSchedLive(C);
     break;
@@ -648,9 +641,6 @@ AArch64TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
     break;
   case RopSched::Scheduler::Score:
     DAG = createSchedPostRA<AArch64ScoreRopSchedStrategy>(C);
-    break;
-  case RopSched::Scheduler::ExtendedScore:
-    DAG = createSchedPostRA<AArch64ExtendedScoreRopSchedStrategy>(C);
     break;
   default:
     DAG = createSchedPostRA<AArch64PostRASchedStrategy>(C);

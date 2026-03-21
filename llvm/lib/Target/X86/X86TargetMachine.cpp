@@ -1007,8 +1007,8 @@ public:
 
 // This is another example of the ExtendedScoreRopSchedStrategy which also doesn't perform that
 // well. Theoretically, AArch64 should perform better because it doesn't suffer from misaligned gadgets.
-struct X86ExtendedScoreRopSchedStrategy : public ExtendedScoreRopSchedStrategy {
-  explicit X86ExtendedScoreRopSchedStrategy(const MachineSchedContext *C) : ExtendedScoreRopSchedStrategy(C) { }
+struct X86ScoreRopSchedStrategy : public ScoreRopSchedStrategy {
+  explicit X86ScoreRopSchedStrategy(const MachineSchedContext *C) : ScoreRopSchedStrategy(C) { }
 
   bool isConditionalDataMove(const MachineInstr &MI) override {
     switch (const auto Opcode = MI.getOpcode(); Opcode) {
