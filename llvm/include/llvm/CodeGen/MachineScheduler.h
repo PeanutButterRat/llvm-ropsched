@@ -1889,7 +1889,7 @@ struct MachineInstrComparisonData {
 
 struct MachineInstrTrieNode {
   const MachineInstrComparisonData Data;
-  std::vector<MachineInstrTrieNode *> Children;
+  std::vector<std::unique_ptr<MachineInstrTrieNode>> Children;
 
   explicit MachineInstrTrieNode(const MachineInstr* MI)
   : Data(MI), Children() { }
@@ -1898,12 +1898,12 @@ struct MachineInstrTrieNode {
   : Data(), Children() { }
 
   // Returns a matching child if there is one. Otherwise, it returns a nullptr.
-  MachineInstrTrieNode *get(const MachineInstr *Node) {
-    MachineInstrComparisonData NodeData{Node};
+  MachineInstrTrieNode *get(const MachineInstr *MI) {
+    MachineInstrComparisonData Data{MI};
 
-    for (MachineInstrTrieNode *Child : Children) {
-      if (NodeData == Child->Data) {
-        return Child;
+    for (auto &Child : Children) {
+      if (Data == Child->Data) {
+        return Child.get();
       }
     }
 
@@ -1916,35 +1916,32 @@ struct MachineInstrTrieNode {
     MachineInstrTrieNode *Child = get(Node);
 
     if (!Child) {
-      Child = new MachineInstrTrieNode{Node};
-      Children.push_back(Child);
+      Children.push_back(std::make_unique<MachineInstrTrieNode>(Node));
+      Child = Children.back().get();
     }
 
     return Child;
   }
 };
 
-// This is a global trie used to track all "scheudling suffixes" accross the entire
-// compilation of the program. It definitely leaks memory since no cleanup is performed,
-// but that doesn't really matter for research purposes.
-static MachineInstrTrieNode BasicBlockSuffixes;
-
 class TrieRopSchedStrategy : public MachineSchedStrategy {
   std::vector<SUnit *> ReadyQ;
+  MachineInstrTrieNode Root;
   MachineInstrTrieNode *LastInstructionScheduled;
   ScheduleDAGMI *DAG;
 
 public:
   explicit TrieRopSchedStrategy(const MachineSchedContext *C)
-    : ReadyQ(), LastInstructionScheduled(&BasicBlockSuffixes), DAG(nullptr) { }
+    : ReadyQ(), Root(), LastInstructionScheduled(&Root), DAG(nullptr) { }
 
   void enterMBB(MachineBasicBlock *MBB) override {
-    LastInstructionScheduled = &BasicBlockSuffixes;  // Reset the scheduling sequence for each new BB.
+    LastInstructionScheduled = &Root;  // Reset the scheduling sequence for each new BB.
   }
 
   void initialize(ScheduleDAGMI *DAG) override {
     this->DAG = DAG;
     ReadyQ.clear();
+    LastInstructionScheduled = &Root;
   }
 
   void releaseBottomNode(SUnit *SU) override {
