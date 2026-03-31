@@ -1844,7 +1844,7 @@ public:
 
   void schedNode(SUnit *SU, bool IsTopNode) override { }
 
-  void releaseBottomNode(SUnit *SU) override { };
+  void releaseBottomNode(SUnit *SU) override { }
 };
 
 

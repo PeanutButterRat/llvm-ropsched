@@ -50,6 +50,7 @@
 #include "llvm/Transforms/CFGuard.h"
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
 
 // Extra includes for instruction lowering.
@@ -64,11 +65,25 @@
 
 using namespace llvm;
 
-// This flag is for selecting whether or not to use the CapstoneRopSchedStrategy during
-// scheduling or the generic post-RA scheduler.
-cl::opt<bool> EnableX86CapstoneRopSchedStrategy(
-    "enable-x86-capstone-ropsched", cl::Hidden, cl::init(false),
-    cl::desc("Toggles which post-RA machine scheduler should be used for x86 (PostGenericScheduler or X86CapstoneRopSchedStrategy)"));
+namespace RopSched {
+enum Scheduler {
+  Default,
+  Random,
+  Capstone,
+};
+}
+
+static cl::opt<RopSched::Scheduler> X86PostRARopSchedScheduler(
+    "x86-postra-ropsched-strategy", cl::Hidden,
+    cl::desc("Post-RA RopSched scheduling strategy to use for X86"),
+    cl::init(RopSched::Scheduler::Default),
+    cl::values(
+        clEnumValN(RopSched::Scheduler::Default, "default",
+                   "Default X86 strategy (PostGenericScheduler)"),
+        clEnumValN(RopSched::Scheduler::Random, "random",
+                   "RandomScheduler"),
+        clEnumValN(RopSched::Scheduler::Capstone, "capstone",
+                   "X86CapstoneRopSchedStrategy")));
 
 static cl::opt<bool> EnableMachineCombinerPass("x86-machine-combiner",
                                cl::desc("Enable the machine combiner pass"),
@@ -1072,6 +1087,45 @@ struct X86ScoreRopSchedStrategy : public ScoreRopSchedStrategy {
   }
 };
 
+// Schedules instructions randomly. Used to compare against the Capstone scheduler.
+class LLVM_ABI RandomScheduler : public MachineSchedStrategy {
+  std::vector<SUnit *> ReadyQ;
+  std::mt19937 Generator;
+
+public:
+  explicit RandomScheduler(const MachineSchedContext *C) : ReadyQ(), Generator(0) { }
+
+  void initialize(ScheduleDAGMI *DAG) override {
+    ReadyQ.clear();
+  }
+
+  void enterMBB(MachineBasicBlock *MBB) override { }
+
+  void releaseTopNode(SUnit *SU) override {
+    ReadyQ.push_back(SU);
+  }
+
+  SUnit *pickNode(bool &IsTopNode) override {
+    while (!ReadyQ.empty()) {
+      std::uniform_int_distribution<size_t> Distribution{0, ReadyQ.size() - 1};
+      size_t Index = Distribution(Generator);
+      SUnit *Next = ReadyQ.at(Index);
+      ReadyQ.erase(ReadyQ.begin() + Index);
+
+      if (!Next->isScheduled) {
+        IsTopNode = true;
+        return Next;
+      }
+    }
+
+    return nullptr;
+  }
+
+  void schedNode(SUnit *SU, bool IsTopNode) override { }
+
+  void releaseBottomNode(SUnit *SU) override { }
+};
+
 ScheduleDAGInstrs *
 X86TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
   ScheduleDAGMILive *DAG = createSchedLive(C);
@@ -1081,7 +1135,20 @@ X86TargetMachine::createMachineScheduler(MachineSchedContext *C) const {
 
 ScheduleDAGInstrs *
 X86TargetMachine::createPostMachineScheduler(MachineSchedContext *C) const {
-  ScheduleDAGMI *DAG = (EnableX86CapstoneRopSchedStrategy) ? createSchedPostRA<X86CapstoneRopSchedStrategy>(C) : createSchedPostRA(C);
+  ScheduleDAGMI *DAG = nullptr;
+
+  switch (X86PostRARopSchedScheduler) {
+  case RopSched::Scheduler::Capstone:
+    DAG = createSchedPostRA<X86CapstoneRopSchedStrategy>(C);
+    break;
+  case RopSched::Scheduler::Random:
+    DAG = createSchedPostRA<RandomScheduler>(C);
+    break;
+  default:
+    DAG = createSchedPostRA(C);
+    break;
+  }
+
   DAG->addMutation(createX86MacroFusionDAGMutation());
   return DAG;
 }
